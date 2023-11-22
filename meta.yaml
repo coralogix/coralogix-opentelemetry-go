@@ -1,0 +1,7 @@
+name: coralogix-opentelemetry-go
+deployable_type: library
+enabled: false
+lifecycle_status: development
+cx_metadata:
+  cx_feature_id: tracing
+  cx_service_rnd_owner_id: veni-vici
