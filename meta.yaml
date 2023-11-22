@@ -1,6 +1,6 @@
 name: coralogix-opentelemetry-go
 deployable_type: library
-enabled: false
+enabled: true
 lifecycle_status: development
 cx_metadata:
   cx_feature_id: tracing
