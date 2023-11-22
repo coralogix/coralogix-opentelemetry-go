@@ -1,4 +1,4 @@
-module ws-promql-ast
+module com.coralogix.opentelemetry-go
 
 go 1.17
 
