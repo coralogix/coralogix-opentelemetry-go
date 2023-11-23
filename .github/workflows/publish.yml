@@ -1,0 +1,30 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+' # e.g., v1.2.3
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semantic Version (e.g., v1.2.3)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Run tests
+        run: GOPROXY=proxy.golang.org go list -m github.com/coralogix/com.coralogix.opentelemetry-go@${{ env.VERSION }}
+
