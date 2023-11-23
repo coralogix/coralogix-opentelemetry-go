@@ -1,4 +1,4 @@
-module com.coralogix.opentelemetry-go
+module github.com/coralogix/coralogix-opentelemetry-go
 
 go 1.17
 
