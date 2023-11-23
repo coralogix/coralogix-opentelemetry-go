@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	TransactionIdentifier               = "cgx.transaction"
-	TransactionIdentifierTraceState     = "cgx_transaction"
-	DistributedTransactionIdentifier    = "cgx.transaction.distributed"
-	DistributedTransactionIdentifierTSE = "cgx_transaction_distributed"
+	TransactionIdentifier                      = "cgx.transaction"
+	TransactionIdentifierTraceState            = "cgx_transaction"
+	DistributedTransactionIdentifier           = "cgx.transaction.distributed"
+	DistributedTransactionIdentifierTraceState = "cgx_transaction_distributed"
 )
 
 type CoralogixSampler struct {
@@ -47,7 +47,7 @@ func (s *CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampl
 	sampledAttributes := adaptedSamplingResult.Attributes
 
 	transactionIdentifier := attribute.String(TransactionIdentifier, newTracingState.Get(TransactionIdentifierTraceState))
-	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTSE))
+	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTraceState))
 
 	return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier)
 }
@@ -68,8 +68,8 @@ func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name strin
 	if err != nil {
 		return parentTraceState
 	}
-	if parentTraceState.Get(DistributedTransactionIdentifierTSE) == "" {
-		parentTraceState, err = parentTraceState.Insert(DistributedTransactionIdentifierTSE, name)
+	if parentTraceState.Get(DistributedTransactionIdentifierTraceState) == "" {
+		parentTraceState, err = parentTraceState.Insert(DistributedTransactionIdentifierTraceState, name)
 		if err != nil {
 			return parentTraceState
 		}
