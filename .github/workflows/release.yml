@@ -34,3 +34,6 @@ jobs:
           release_name: Release ${{ env.VERSION }}
           draft: false
           prerelease: false
+
+      - name: publish
+        run: GOPROXY=proxy.golang.org go list -m github.com/coralogix/coralogix-opentelemetry-go@${{ env.VERSION }}
