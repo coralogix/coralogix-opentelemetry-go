@@ -26,5 +26,5 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Run tests
-        run: GOPROXY=proxy.golang.org go list -m github.com/coralogix/com.coralogix.opentelemetry-go@${{ env.VERSION }}
+        run: GOPROXY=proxy.golang.org go list -m com.coralogix.opentelemetry-go/sampler@${{ env.VERSION }}
 
