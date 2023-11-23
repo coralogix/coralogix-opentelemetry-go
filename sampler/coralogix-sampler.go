@@ -14,29 +14,29 @@ const (
 	DistributedTransactionIdentifierTraceState = "cgx_transaction_distributed"
 )
 
-type CoralogixSampler struct {
+type coralogixSampler struct {
 	adaptedSampler traceSdk.Sampler
 }
 
-func NewCoralogixSampler(adaptedSampler traceSdk.Sampler) *CoralogixSampler {
+func NewCoralogixSampler(adaptedSampler traceSdk.Sampler) coralogixSampler {
 	if adaptedSampler == nil {
 		panic("sampler is null")
 	}
-	return &CoralogixSampler{
+	return coralogixSampler{
 		adaptedSampler: adaptedSampler,
 	}
 }
-func (s *CoralogixSampler) Description() string {
+func (s coralogixSampler) Description() string {
 	return "coralogix-sampler"
 }
 
-func (s *CoralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) traceSdk.SamplingResult {
+func (s coralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) traceSdk.SamplingResult {
 	adaptedSamplingResult := s.adaptedSampler.ShouldSample(parameters)
 
 	return s.generateTransactionSamplingResult(parameters.ParentContext, parameters.Name, adaptedSamplingResult)
 }
 
-func (s *CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult) traceSdk.SamplingResult {
+func (s coralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult) traceSdk.SamplingResult {
 	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult)
 	newAttributes := s.injectAttributes(adaptedSamplingResult, newTracingState)
 	return traceSdk.SamplingResult{
@@ -46,7 +46,7 @@ func (s *CoralogixSampler) generateTransactionSamplingResult(ctx context.Context
 	}
 }
 
-func (s *CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.SamplingResult, newTracingState traceCore.TraceState) []attribute.KeyValue {
+func (s coralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.SamplingResult, newTracingState traceCore.TraceState) []attribute.KeyValue {
 	sampledAttributes := adaptedSamplingResult.Attributes
 
 	transactionIdentifier := attribute.String(TransactionIdentifier, newTracingState.Get(TransactionIdentifierTraceState))
@@ -55,11 +55,11 @@ func (s *CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampl
 	return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier)
 }
 
-func (s *CoralogixSampler) getDescription() string {
+func (s *coralogixSampler) getDescription() string {
 	return "coralogix-sampler"
 }
 
-func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult) traceCore.TraceState {
+func (s *coralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult) traceCore.TraceState {
 	parentSpanContext := s.getParentSpanContext(ctx)
 	parentTraceState := samplingResult.Tracestate
 
@@ -81,7 +81,7 @@ func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name strin
 	return parentTraceState
 }
 
-func (s *CoralogixSampler) getParentSpanContext(ctx context.Context) traceCore.SpanContext {
+func (s *coralogixSampler) getParentSpanContext(ctx context.Context) traceCore.SpanContext {
 	span := traceCore.SpanFromContext(ctx)
 	if span != nil {
 		return span.SpanContext()
