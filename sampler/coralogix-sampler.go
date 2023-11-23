@@ -26,6 +26,9 @@ func NewCoralogixSampler(adaptedSampler traceSdk.Sampler) *CoralogixSampler {
 		adaptedSampler: adaptedSampler,
 	}
 }
+func (s *CoralogixSampler) Description() string {
+	return "coralogix-sampler"
+}
 
 func (s *CoralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) traceSdk.SamplingResult {
 	adaptedSamplingResult := s.adaptedSampler.ShouldSample(parameters)
