@@ -32,6 +32,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
+			attribute.Bool(TransactionIdentifierRoot, true),
 		}
 
 		expectedTraceState := traceCore.TraceState{}
@@ -59,6 +60,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
+			attribute.Bool(TransactionIdentifierRoot, true),
 		}
 
 		expectedTraceState := traceCore.TraceState{}
@@ -143,6 +145,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.Bool(TransactionIdentifierRoot, true),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
@@ -182,6 +185,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.Bool(TransactionIdentifierRoot, true),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
