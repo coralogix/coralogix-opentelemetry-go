@@ -70,6 +70,26 @@ func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name strin
 	parentTraceState := samplingResult.Tracestate
 
 	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" {
+		span := traceCore.SpanFromContext(ctx)
+		if span != nil {
+			readWriteSpan, ok := span.(traceSdk.ReadWriteSpan)
+			if ok {
+				attributes := readWriteSpan.Attributes()
+				if attributes != nil {
+					for _, attribute := range attributes {
+						if attribute.Key == TransactionIdentifier {
+							parentTraceState, err := parentTraceState.Insert(TransactionIdentifierTraceState, attribute.Value.AsString())
+							if err == nil {
+								return parentTraceState
+							}
+						}
+					}
+				}
+
+			}
+		}
+
+		/**/
 		return parentTraceState
 	}
 
@@ -93,4 +113,9 @@ func (s *CoralogixSampler) getParentSpanContext(ctx context.Context) traceCore.S
 		return span.SpanContext()
 	}
 	return traceCore.SpanContext{}
+}
+func StartNewTransaction(span traceCore.Span, flow string) traceCore.Span {
+	span.SetAttributes(attribute.String(TransactionIdentifier, flow))
+	span.SetAttributes(attribute.Bool(TransactionIdentifierRoot, true))
+	return span
 }
