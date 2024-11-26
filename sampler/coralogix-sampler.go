@@ -3,7 +3,9 @@ package sampler
 import (
 	"context"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
 	traceSdk "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	traceCore "go.opentelemetry.io/otel/trace"
 )
 
@@ -13,19 +15,40 @@ const (
 	TransactionIdentifierTraceState            = "cgx_transaction"
 	DistributedTransactionIdentifier           = "cgx.transaction.distributed"
 	DistributedTransactionIdentifierTraceState = "cgx_transaction_distributed"
+	TransactionServiceIdentifier               = "cgx.transaction"
+	TransactionServiceIdentifierTraceState     = "cgx_transaction_service"
 )
 
 type CoralogixSampler struct {
 	adaptedSampler traceSdk.Sampler
+	service        string
 }
 
-func NewCoralogixSampler(adaptedSampler traceSdk.Sampler) CoralogixSampler {
+func NewCoralogixSampler(adaptedSampler traceSdk.Sampler, resa *resource.Resource) CoralogixSampler {
+
 	if adaptedSampler == nil {
 		panic("sampler is null")
 	}
+	if resa == nil {
+		panic("resource is null")
+	}
+	attributes := resa.Attributes()
+	service := ""
+	if attributes != nil {
+		for _, attribute := range attributes {
+			if attribute.Key == semconv.ServiceNameKey {
+				service = attribute.Value.AsString()
+			}
+		}
+	}
+	if service == "" {
+		panic("service name is empty")
+	}
 	return CoralogixSampler{
 		adaptedSampler: adaptedSampler,
+		service:        service,
 	}
+
 }
 func (s CoralogixSampler) Description() string {
 	return "coralogix-sampler"
@@ -34,11 +57,11 @@ func (s CoralogixSampler) Description() string {
 func (s CoralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) traceSdk.SamplingResult {
 	adaptedSamplingResult := s.adaptedSampler.ShouldSample(parameters)
 
-	return s.generateTransactionSamplingResult(parameters.ParentContext, parameters.Name, adaptedSamplingResult)
+	return s.generateTransactionSamplingResult(parameters.ParentContext, parameters.Name, adaptedSamplingResult, parameters.Kind)
 }
 
-func (s CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult) traceSdk.SamplingResult {
-	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult)
+func (s CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceSdk.SamplingResult {
+	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult, kind)
 	newAttributes := s.injectAttributes(adaptedSamplingResult, newTracingState, name)
 	return traceSdk.SamplingResult{
 		Decision:   adaptedSamplingResult.Decision,
@@ -65,15 +88,19 @@ func (s *CoralogixSampler) getDescription() string {
 	return "coralogix-sampler"
 }
 
-func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult) traceCore.TraceState {
+func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceCore.TraceState {
 	parentSpanContext := s.getParentSpanContext(ctx)
 	parentTraceState := samplingResult.Tracestate
 
-	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" {
+	if !(kind == traceCore.SpanKindConsumer) && !(kind == traceCore.SpanKindServer) && !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && parentTraceState.Get(TransactionServiceIdentifierTraceState) == s.service {
 		return parentTraceState
 	}
 
 	parentTraceState, err := parentTraceState.Insert(TransactionIdentifierTraceState, name)
+	if err != nil {
+		return parentTraceState
+	}
+	parentTraceState, err = parentTraceState.Insert(TransactionServiceIdentifierTraceState, s.service)
 	if err != nil {
 		return parentTraceState
 	}
