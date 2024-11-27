@@ -34,11 +34,11 @@ func (s CoralogixSampler) Description() string {
 func (s CoralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) traceSdk.SamplingResult {
 	adaptedSamplingResult := s.adaptedSampler.ShouldSample(parameters)
 
-	return s.generateTransactionSamplingResult(parameters.ParentContext, parameters.Name, adaptedSamplingResult)
+	return s.generateTransactionSamplingResult(parameters.ParentContext, parameters.Name, adaptedSamplingResult, parameters.Kind)
 }
 
-func (s CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult) traceSdk.SamplingResult {
-	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult)
+func (s CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceSdk.SamplingResult {
+	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult, kind)
 	newAttributes := s.injectAttributes(adaptedSamplingResult, newTracingState, name)
 	return traceSdk.SamplingResult{
 		Decision:   adaptedSamplingResult.Decision,
@@ -65,11 +65,11 @@ func (s *CoralogixSampler) getDescription() string {
 	return "coralogix-sampler"
 }
 
-func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult) traceCore.TraceState {
+func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceCore.TraceState {
 	parentSpanContext := s.getParentSpanContext(ctx)
 	parentTraceState := samplingResult.Tracestate
 
-	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" {
+	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && !(kind == traceCore.SpanKindServer) && !(kind == traceCore.SpanKindConsumer) {
 		span := traceCore.SpanFromContext(ctx)
 		if span != nil {
 			readWriteSpan, ok := span.(traceSdk.ReadWriteSpan)
