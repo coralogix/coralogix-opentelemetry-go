@@ -71,12 +71,18 @@ func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name strin
 	parentTraceState := samplingResult.Tracestate
 
 	log.Printf(
-		"coralogix sampler ParentSpanContext is remote: %v, Transaction Identifier TraceState: %s, Kind: %v",
+		"Coralogix Sampler - ParentSpanContext is remote: %v, "+
+			"Transaction Identifier TraceState: %s, Kind: %v, Name: %s, "+
+			"Is Consumer: %v, Is Server: %v",
 		parentSpanContext.IsRemote(),
 		parentTraceState.Get(TransactionIdentifierTraceState),
-		kind,
+		kind.String(),
+		name,
+		kind == traceCore.SpanKindConsumer,
+		kind == traceCore.SpanKindServer,
 	)
-	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && kind != traceCore.SpanKindServer && !(kind == traceCore.SpanKindServer) && !(kind == traceCore.SpanKindConsumer) {
+
+	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && kind != traceCore.SpanKindServer && !(kind == traceCore.SpanKindConsumer) {
 		span := traceCore.SpanFromContext(ctx)
 		if span != nil {
 			readWriteSpan, ok := span.(traceSdk.ReadWriteSpan)
