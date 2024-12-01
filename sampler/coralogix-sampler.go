@@ -5,6 +5,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	traceSdk "go.opentelemetry.io/otel/sdk/trace"
 	traceCore "go.opentelemetry.io/otel/trace"
+	"log"
 )
 
 const (
@@ -51,14 +52,14 @@ func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampli
 	sampledAttributes := adaptedSamplingResult.Attributes
 
 	transactionName := newTracingState.Get(TransactionIdentifierTraceState)
-	version := attribute.String("cgx.version", "1.4.3")
+	version := attribute.String("cgx.version", "1.4.4")
 	transactionIdentifier := attribute.String(TransactionIdentifier, transactionName)
 	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTraceState))
 	if transactionName == name {
 		rootTransactionAttribute := attribute.Bool(TransactionIdentifierRoot, true)
 		return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier, rootTransactionAttribute, version)
 	}
-	return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier)
+	return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier, version)
 }
 
 func (s *CoralogixSampler) getDescription() string {
@@ -69,7 +70,13 @@ func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name strin
 	parentSpanContext := s.getParentSpanContext(ctx)
 	parentTraceState := samplingResult.Tracestate
 
-	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && !(kind == traceCore.SpanKindServer) && !(kind == traceCore.SpanKindConsumer) {
+	log.Printf(
+		"coralogix sampler ParentSpanContext is remote: %v, Transaction Identifier TraceState: %s, Kind: %v",
+		parentSpanContext.IsRemote(),
+		parentTraceState.Get(TransactionIdentifierTraceState),
+		kind,
+	)
+	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && kind != traceCore.SpanKindServer && !(kind == traceCore.SpanKindServer) && !(kind == traceCore.SpanKindConsumer) {
 		span := traceCore.SpanFromContext(ctx)
 		if span != nil {
 			readWriteSpan, ok := span.(traceSdk.ReadWriteSpan)

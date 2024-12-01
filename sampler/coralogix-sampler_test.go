@@ -33,6 +33,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 
 		expectedTraceState := traceCore.TraceState{}
@@ -61,6 +62,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 
 		expectedTraceState := traceCore.TraceState{}
@@ -108,6 +110,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
@@ -145,6 +148,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
@@ -183,6 +187,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
@@ -223,6 +228,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
@@ -262,6 +268,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
@@ -300,6 +307,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
@@ -338,6 +346,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
@@ -378,6 +387,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
@@ -418,6 +428,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
+			attribute.String("cgx.version", "1.4.4"),
 		}
 		expectedTraceState := traceCore.TraceState{}
 		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
