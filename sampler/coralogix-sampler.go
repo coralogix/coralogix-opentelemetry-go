@@ -5,19 +5,23 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	traceSdk "go.opentelemetry.io/otel/sdk/trace"
 	traceCore "go.opentelemetry.io/otel/trace"
-	"log"
 )
 
 const (
-	TransactionIdentifier                      = "cgx.transaction"
-	TransactionIdentifierRoot                  = "cgx.transaction.root"
-	TransactionIdentifierTraceState            = "cgx_transaction"
-	DistributedTransactionIdentifier           = "cgx.transaction.distributed"
-	DistributedTransactionIdentifierTraceState = "cgx_transaction_distributed"
+	TransactionIdentifier            = "cgx.transaction"
+	TransactionIdentifierRoot        = "cgx.transaction.root"
+	DistributedTransactionIdentifier = "cgx.transaction.distributed"
+	VersionIdentifier                = "cgx.version"
+	Version                          = "1.4.4"
 )
 
 type CoralogixSampler struct {
 	adaptedSampler traceSdk.Sampler
+}
+type TransactionAttributes struct {
+	Transaction string
+	Distributed string
+	Root        bool
 }
 
 func NewCoralogixSampler(adaptedSampler traceSdk.Sampler) CoralogixSampler {
@@ -39,30 +43,27 @@ func (s CoralogixSampler) ShouldSample(parameters traceSdk.SamplingParameters) t
 }
 
 func (s CoralogixSampler) generateTransactionSamplingResult(ctx context.Context, name string, adaptedSamplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceSdk.SamplingResult {
-	newTracingState := s.generateNewTraceState(ctx, name, adaptedSamplingResult, kind)
-	newAttributes := s.injectAttributes(adaptedSamplingResult, newTracingState, name)
+	transaction := s.generateTransactionAttributes(ctx, name, adaptedSamplingResult, kind)
+
+	if adaptedSamplingResult.Decision == traceSdk.Drop {
+		adaptedSamplingResult.Decision = traceSdk.RecordOnly
+	}
+	newAttributes := s.injectAttributes(adaptedSamplingResult, transaction, name)
 	return traceSdk.SamplingResult{
 		Decision:   adaptedSamplingResult.Decision,
 		Attributes: newAttributes,
-		Tracestate: newTracingState,
+		Tracestate: adaptedSamplingResult.Tracestate,
 	}
 }
 
-func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.SamplingResult, newTracingState traceCore.TraceState, name string) []attribute.KeyValue {
+func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.SamplingResult, transaction TransactionAttributes, name string) []attribute.KeyValue {
 	sampledAttributes := adaptedSamplingResult.Attributes
 
-	transactionName := newTracingState.Get(TransactionIdentifierTraceState)
+	transactionName := transaction.Transaction
 
-	log.Printf(
-		"Coralogix Sampler - Transaction Identifier TraceState: %s, Name: %s - New TraceState: %s",
-		transactionName,
-		name,
-		newTracingState,
-	)
-
-	version := attribute.String("cgx.version", "1.4.4")
+	version := attribute.String(VersionIdentifier, Version)
 	transactionIdentifier := attribute.String(TransactionIdentifier, transactionName)
-	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTraceState))
+	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, transaction.Distributed)
 	if transactionName == name {
 		rootTransactionAttribute := attribute.Bool(TransactionIdentifierRoot, true)
 		return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier, rootTransactionAttribute, version)
@@ -70,70 +71,56 @@ func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampli
 	return append(sampledAttributes, transactionIdentifier, distributedTransactionIdentifier, version)
 }
 
-func (s *CoralogixSampler) getDescription() string {
+func (s CoralogixSampler) getDescription() string {
 	return "coralogix-sampler"
 }
+func shouldStartNewTransaction(isRemote bool, transactionName string, kind traceCore.SpanKind) bool {
+	return isRemote || transactionName == "" || kind == traceCore.SpanKindServer || kind == traceCore.SpanKindConsumer
 
-func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceCore.TraceState {
-	parentSpanContext := s.getParentSpanContext(ctx)
-	parentTraceState := samplingResult.Tracestate
+}
+func (s CoralogixSampler) generateTransactionAttributes(ctx context.Context, name string, samplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) TransactionAttributes {
+	span := traceCore.SpanFromContext(ctx)
 
-	log.Printf(
-		"Coralogix Sampler - ParentSpanContext is remote: %v, "+
-			"Transaction Identifier TraceState: %s, Kind: %v, Name: %s, "+
-			"Is Consumer: %v, Is Server: %v",
-		parentSpanContext.IsRemote(),
-		parentTraceState.Get(TransactionIdentifierTraceState),
-		kind.String(),
-		name,
-		kind == traceCore.SpanKindConsumer,
-		kind == traceCore.SpanKindServer,
-	)
+	if span != nil {
+		readWriteSpan, ok := span.(traceSdk.ReadOnlySpan)
 
-	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && kind != traceCore.SpanKindServer && !(kind == traceCore.SpanKindConsumer) {
-		span := traceCore.SpanFromContext(ctx)
-		if span != nil {
-			readWriteSpan, ok := span.(traceSdk.ReadWriteSpan)
-			if ok {
-				attributes := readWriteSpan.Attributes()
-				if attributes != nil {
-					for _, attribute := range attributes {
-						if attribute.Key == TransactionIdentifier {
-							parentTraceState, err := parentTraceState.Insert(TransactionIdentifierTraceState, attribute.Value.AsString())
-							if err == nil {
-								return parentTraceState
-							}
-						}
-					}
-				}
+		if ok {
+			parentAttributes := readWriteSpan.Attributes()
+			parentTransaction := s.getTransactionAttributes(parentAttributes)
 
+			if !shouldStartNewTransaction(span.SpanContext().IsRemote(), parentTransaction.Transaction, kind) {
+				return parentTransaction
 			}
+
 		}
 
 		/**/
-		return parentTraceState
 	}
+	newTransaction := TransactionAttributes{Transaction: name, Distributed: name, Root: true}
+	return newTransaction
 
-	parentTraceState, err := parentTraceState.Insert(TransactionIdentifierTraceState, name)
-	if err != nil {
-		return parentTraceState
-	}
-	if parentTraceState.Get(DistributedTransactionIdentifierTraceState) == "" {
-		parentTraceState, err = parentTraceState.Insert(DistributedTransactionIdentifierTraceState, name)
-		if err != nil {
-			return parentTraceState
-		}
-	}
-
-	return parentTraceState
 }
 
-func (s *CoralogixSampler) getParentSpanContext(ctx context.Context) traceCore.SpanContext {
+func (s CoralogixSampler) getParentSpanContext(ctx context.Context) traceCore.SpanContext {
 	span := traceCore.SpanFromContext(ctx)
 	if span != nil {
 		return span.SpanContext()
 	}
 	return traceCore.SpanContext{}
+}
+
+func (s CoralogixSampler) getTransactionAttributes(attributes []attribute.KeyValue) TransactionAttributes {
+	transactionAttributes := TransactionAttributes{}
+	for _, keyValue := range attributes {
+		if keyValue.Key == TransactionIdentifier {
+			transactionAttributes.Transaction = keyValue.Value.AsString()
+		}
+		if keyValue.Key == DistributedTransactionIdentifier {
+			transactionAttributes.Distributed = keyValue.Value.AsString()
+		}
+
+	}
+	return transactionAttributes
 }
 func StartNewTransaction(span traceCore.Span, flow string) traceCore.Span {
 	span.SetAttributes(attribute.String(TransactionIdentifier, flow))

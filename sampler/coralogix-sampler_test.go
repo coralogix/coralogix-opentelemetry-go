@@ -17,6 +17,8 @@ const (
 )
 
 func TestCoralogixSampler_ShouldSample(t *testing.T) {
+	tracer := traceSdk.NewTracerProvider(traceSdk.WithSampler(traceSdk.AlwaysSample())).Tracer("test")
+
 	t.Run("When_alwaysSampler_Should_AppendAttributesAndState", func(t *testing.T) {
 		alwaysSampler := traceSdk.AlwaysSample()
 		coralogixSampler := NewCoralogixSampler(alwaysSampler)
@@ -33,17 +35,11 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-
-		expectedTraceState := traceCore.TraceState{}
-
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, spanName)
 
 		assert.Equal(t, traceSdk.RecordAndSample, result.Decision)
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
 
 	t.Run("When_NeverSample_Should_AppendAttributesAndState", func(t *testing.T) {
@@ -62,17 +58,11 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, spanName),
 			attribute.String(DistributedTransactionIdentifier, spanName),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
 
-		expectedTraceState := traceCore.TraceState{}
-
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, spanName)
-
-		assert.Equal(t, traceSdk.Drop, result.Decision)
+		assert.Equal(t, traceSdk.RecordOnly, result.Decision)
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
 
 	t.Run("When_CustomSamplerIsNull_ShouldFailInit", func(t *testing.T) {
@@ -86,9 +76,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		coralogixSampler := NewCoralogixSampler(alwaysSampler)
 
 		traceState := traceCore.TraceState{}
-
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -99,6 +89,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
 
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
@@ -110,14 +101,10 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		expectedTraceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
 	t.Run("When_ParentContextExistsAndNotRemote_ShouldCopyParentTraceState", func(t *testing.T) {
 		alwaysSampler := traceSdk.AlwaysSample()
@@ -125,8 +112,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 
 		traceState := traceCore.TraceState{}
 
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -136,6 +124,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     false,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
@@ -148,12 +137,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
 		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		expectedTraceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
-
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
 		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
@@ -162,9 +148,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		coralogixSampler := NewCoralogixSampler(alwaysSampler)
 
 		traceState := traceCore.TraceState{}
-
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -174,6 +160,7 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     true,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
@@ -187,15 +174,11 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState.Get(TransactionIdentifierTraceState), result.Tracestate.Get(TransactionIdentifierTraceState))
-		assert.Equal(t, expectedTraceState.Get(DistributedTransactionIdentifierTraceState), result.Tracestate.Get(DistributedTransactionIdentifierTraceState))
+
 	})
 
 	t.Run("When_ParentContextExistsAndRemote_ShouldCopyParentTraceState", func(t *testing.T) {
@@ -204,8 +187,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 
 		traceState := traceCore.TraceState{}
 
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -215,12 +199,13 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     true,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 		}
 		result := coralogixSampler.ShouldSample(parameters)
 
@@ -228,15 +213,11 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState.Get(TransactionIdentifierTraceState), result.Tracestate.Get(TransactionIdentifierTraceState))
-		assert.Equal(t, expectedTraceState.Get(DistributedTransactionIdentifierTraceState), result.Tracestate.Get(DistributedTransactionIdentifierTraceState))
+
 	})
 	t.Run("When_ParentContextExistsAndRemote_ShouldCopyParentTraceState", func(t *testing.T) {
 		alwaysSampler := traceSdk.AlwaysSample()
@@ -244,8 +225,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 
 		traceState := traceCore.TraceState{}
 
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -260,32 +242,29 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 		}
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
+
 		result := coralogixSampler.ShouldSample(parameters)
 
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState.Get(TransactionIdentifierTraceState), result.Tracestate.Get(TransactionIdentifierTraceState))
-		assert.Equal(t, expectedTraceState.Get(DistributedTransactionIdentifierTraceState), result.Tracestate.Get(DistributedTransactionIdentifierTraceState))
 	})
 	t.Run("When_SetFlow_ParentContextExistsAndNotRemote_ShouldCopyParentTraceState", func(t *testing.T) {
 		alwaysSampler := traceSdk.AlwaysSample()
 		coralogixSampler := NewCoralogixSampler(alwaysSampler)
 
 		traceState := traceCore.TraceState{}
-
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -295,26 +274,23 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     false,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 		}
 		result := coralogixSampler.ShouldSample(parameters)
 
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		expectedTraceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
 
 	t.Run("When_SetFlow_ParentContextExistsAndNotRemote_ShouldCopyParentTraceState", func(t *testing.T) {
@@ -322,9 +298,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 		coralogixSampler := NewCoralogixSampler(alwaysSampler)
 
 		traceState := traceCore.TraceState{}
-
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -334,26 +310,23 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     false,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 		}
 		result := coralogixSampler.ShouldSample(parameters)
 
 		expectedAttributes := []attribute.KeyValue{
 			attribute.String(TransactionIdentifier, "fatherSpanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		expectedTraceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState, result.Tracestate)
 	})
 
 	t.Run("When_ParentContextExistsAndNotRemoteButServer_ShouldCopyNotParentTraceState", func(t *testing.T) {
@@ -362,8 +335,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 
 		traceState := traceCore.TraceState{}
 
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -373,12 +347,13 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     false,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 			Kind:          traceCore.SpanKindServer,
 		}
 		result := coralogixSampler.ShouldSample(parameters)
@@ -387,15 +362,10 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState.Get(TransactionIdentifierTraceState), result.Tracestate.Get(TransactionIdentifierTraceState))
-		assert.Equal(t, expectedTraceState.Get(DistributedTransactionIdentifierTraceState), result.Tracestate.Get(DistributedTransactionIdentifierTraceState))
 	})
 	t.Run("When_ParentContextExistsAndNotRemoteButServer_ShouldCopyNotParentTraceState", func(t *testing.T) {
 		alwaysSampler := traceSdk.AlwaysSample()
@@ -403,8 +373,9 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 
 		traceState := traceCore.TraceState{}
 
-		traceState, _ = traceState.Insert(TransactionIdentifierTraceState, "fatherSpanName")
-		traceState, _ = traceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
+		parentAttributes := []attribute.KeyValue{}
+		parentAttributes = append(parentAttributes, attribute.String(TransactionIdentifier, "fatherSpanName"))
+		parentAttributes = append(parentAttributes, attribute.String(DistributedTransactionIdentifier, "fatherSpanName"))
 
 		parentSpan := traceCore.NewSpanContext(traceCore.SpanContextConfig{
 			TraceID:    traceCore.TraceID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F},
@@ -414,12 +385,13 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			Remote:     false,
 		})
 		parentCtx := traceCore.ContextWithSpanContext(context.Background(), parentSpan)
+		parentCtx, _ = tracer.Start(parentCtx, "fatherSpanName", traceCore.WithAttributes(parentAttributes...))
 
 		// Act
 		parameters := traceSdk.SamplingParameters{
 			ParentContext: parentCtx,
 			Name:          spanName,
-			Attributes:    []attribute.KeyValue{},
+			Attributes:    parentAttributes,
 			Kind:          traceCore.SpanKindConsumer,
 		}
 		result := coralogixSampler.ShouldSample(parameters)
@@ -428,14 +400,10 @@ func TestCoralogixSampler_ShouldSample(t *testing.T) {
 			attribute.String(TransactionIdentifier, "spanName"),
 			attribute.String(DistributedTransactionIdentifier, "fatherSpanName"),
 			attribute.Bool(TransactionIdentifierRoot, true),
-			attribute.String("cgx.version", "1.4.4"),
+			attribute.String(VersionIdentifier, Version),
 		}
-		expectedTraceState := traceCore.TraceState{}
-		expectedTraceState, _ = expectedTraceState.Insert(TransactionIdentifierTraceState, spanName)
-		expectedTraceState, _ = expectedTraceState.Insert(DistributedTransactionIdentifierTraceState, "fatherSpanName")
 
 		assert.ElementsMatch(t, expectedAttributes, result.Attributes)
-		assert.Equal(t, expectedTraceState.Get(TransactionIdentifierTraceState), result.Tracestate.Get(TransactionIdentifierTraceState))
-		assert.Equal(t, expectedTraceState.Get(DistributedTransactionIdentifierTraceState), result.Tracestate.Get(DistributedTransactionIdentifierTraceState))
+
 	})
 }
