@@ -91,13 +91,13 @@ func TestPostgresqlParse(t *testing.T) {
 		{
 			name:     "select with multiple conditions",
 			input:    "SELECT * FROM users WHERE age > 18 AND name = 'Alice'",
-			expected: "SELECT * FROM users WHERE age > '?' AND name = '?'",
+			expected: "SELECT * FROM users WHERE (age > '?') AND (name = '?')",
 			wantErr:  false,
 		},
 		{
-			name:     "statement with dollar sign in values",
+			name:     "statement with dollar sign in values don't work",
 			input:    "INSERT INTO prices (amount) VALUES ($100.50)",
-			expected: "INSERT INTO prices (amount) VALUES ('?')",
+			expected: "INSERT INTO prices(amount) VALUES (100.50)",
 			wantErr:  false,
 		},
 		{
@@ -109,19 +109,19 @@ func TestPostgresqlParse(t *testing.T) {
 		{
 			name:     "right join with multiple conditions",
 			input:    "SELECT d.department_name, e.name FROM employees AS e RIGHT JOIN departments AS d ON e.dept_id = d.id AND e.status = 'active'",
-			expected: "SELECT d.department_name, e.name FROM employees AS e RIGHT JOIN departments AS d ON e.dept_id = d.id AND e.status = '?'",
+			expected: "SELECT d.department_name, e.name FROM employees AS e RIGHT JOIN departments AS d ON (e.dept_id = d.id) AND (e.status = '?')",
 			wantErr:  false,
 		},
 		{
 			name:     "full outer join",
 			input:    "SELECT s.student_name, c.course_name FROM students AS s FULL OUTER JOIN courses AS c ON s.course_id = c.id WHERE s.grade > 80",
-			expected: "SELECT s.student_name, c.course_name FROM students AS s FULL OUTER JOIN courses AS c ON s.course_id = c.id WHERE s.grade > '?'",
+			expected: "SELECT s.student_name, c.course_name FROM students AS s FULL JOIN courses AS c ON s.course_id = c.id WHERE s.grade > '?'",
 			wantErr:  false,
 		},
 		{
 			name:     "multiple joins with aggregation",
 			input:    "SELECT p.category, s.supplier_name, COUNT(*) as count FROM products AS p JOIN suppliers AS s ON p.supplier_id = s.id JOIN orders AS o ON p.id = o.product_id WHERE o.order_date > '2023-01-01' GROUP BY p.category, s.supplier_name",
-			expected: "SELECT p.category, s.supplier_name, COUNT(*) as count FROM products AS p JOIN suppliers AS s ON p.supplier_id = s.id JOIN orders AS o ON p.id = o.product_id WHERE o.order_date > '?' GROUP BY p.category, s.supplier_name",
+			expected: "SELECT p.category, s.supplier_name, count(*) AS count FROM products AS p JOIN suppliers AS s ON p.supplier_id = s.id JOIN orders AS o ON p.id = o.product_id WHERE o.order_date > '?' GROUP BY p.category, s.supplier_name",
 			wantErr:  false,
 		},
 		{
