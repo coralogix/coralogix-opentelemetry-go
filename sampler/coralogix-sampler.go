@@ -52,7 +52,7 @@ func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampli
 
 	transactionName := newTracingState.Get(TransactionIdentifierTraceState)
 
-	version := attribute.String("cgx.version", "1.4.4")
+	version := attribute.String("cgx.version", "1.4.7")
 	transactionIdentifier := attribute.String(TransactionIdentifier, transactionName)
 	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTraceState))
 	if transactionName == name {
