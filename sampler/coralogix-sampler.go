@@ -5,7 +5,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	traceSdk "go.opentelemetry.io/otel/sdk/trace"
 	traceCore "go.opentelemetry.io/otel/trace"
-	"log"
 )
 
 const (
@@ -53,13 +52,6 @@ func (s CoralogixSampler) injectAttributes(adaptedSamplingResult traceSdk.Sampli
 
 	transactionName := newTracingState.Get(TransactionIdentifierTraceState)
 
-	log.Printf(
-		"Coralogix Sampler - Transaction Identifier TraceState: %s, Name: %s - New TraceState: %s",
-		transactionName,
-		name,
-		newTracingState,
-	)
-
 	version := attribute.String("cgx.version", "1.4.4")
 	transactionIdentifier := attribute.String(TransactionIdentifier, transactionName)
 	distributedTransactionIdentifier := attribute.String(DistributedTransactionIdentifier, newTracingState.Get(DistributedTransactionIdentifierTraceState))
@@ -77,18 +69,6 @@ func (s *CoralogixSampler) getDescription() string {
 func (s *CoralogixSampler) generateNewTraceState(ctx context.Context, name string, samplingResult traceSdk.SamplingResult, kind traceCore.SpanKind) traceCore.TraceState {
 	parentSpanContext := s.getParentSpanContext(ctx)
 	parentTraceState := samplingResult.Tracestate
-
-	log.Printf(
-		"Coralogix Sampler - ParentSpanContext is remote: %v, "+
-			"Transaction Identifier TraceState: %s, Kind: %v, Name: %s, "+
-			"Is Consumer: %v, Is Server: %v",
-		parentSpanContext.IsRemote(),
-		parentTraceState.Get(TransactionIdentifierTraceState),
-		kind.String(),
-		name,
-		kind == traceCore.SpanKindConsumer,
-		kind == traceCore.SpanKindServer,
-	)
 
 	if !parentSpanContext.IsRemote() && parentTraceState.Get(TransactionIdentifierTraceState) != "" && kind != traceCore.SpanKindServer && !(kind == traceCore.SpanKindConsumer) {
 		span := traceCore.SpanFromContext(ctx)
