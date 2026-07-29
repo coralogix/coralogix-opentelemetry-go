@@ -381,15 +381,14 @@ func TestCompletionHoldback_StaleTimerDoesNotFinalizeEarly(t *testing.T) {
 	)
 	root.End(tracecore.WithTimestamp(base.Add(10 * time.Millisecond)))
 
-	// Let the first holdback nearly elapse, then start a child which stops the
-	// stale timer and arms a replacement. The stopped timer must not finalize.
+	// Near first holdback expiry, a child stops that timer and arms a replacement.
 	time.Sleep(holdback - 10*time.Millisecond)
 	_, child := tracer.Start(rootCtx, "late-child",
 		tracecore.WithTimestamp(base.Add(20*time.Millisecond)),
 	)
 	child.End(tracecore.WithTimestamp(base.Add(30 * time.Millisecond)))
 
-	// Past the original timer deadline, still inside the replacement holdback.
+	// Past original deadline; replacement holdback still open.
 	time.Sleep(20 * time.Millisecond)
 	assert.Empty(t, exporter.GetSpans(), "stale stopped holdback must not finalize after replacement armed")
 
@@ -402,6 +401,7 @@ func TestCompletionHoldback_StaleTimerDoesNotFinalizeEarly(t *testing.T) {
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
+// gatedStickyExporter blocks the first ExportSpans until release is closed.
 type gatedStickyExporter struct {
 	mu       sync.Mutex
 	spans    sdktracetest.SpanStubs
@@ -439,9 +439,7 @@ func (e *gatedStickyExporter) get() sdktracetest.SpanStubs {
 }
 
 func TestExporterShutdown_AtomicVisibleAcrossMuAndExportMu(t *testing.T) {
-	// Under -race, publishing exporterShutdown via atomic.Bool (not dual
-	// bool writes under mu and exportMu) must stay race-free while OnEnd
-	// and ExportSpans race with Shutdown.
+	// Race check: exporterShutdown is atomic.Bool shared across p.mu and exportMu.
 	exporter := &stickyExporter{}
 	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -507,8 +505,7 @@ func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 		t.Fatal("ForceFlush did not reach ExportSpans for first idle trace")
 	}
 
-	// While first accept is unlocked in ExportSpans, end another TraceID so it
-	// arms holdback; flushPendingCompletions must re-scan and drain it too.
+	// While first accept is unlocked in ExportSpans, arm holdback on another TraceID.
 	_, second := tracer.Start(context.Background(), "second",
 		tracecore.WithTimestamp(base.Add(10*time.Millisecond)),
 	)

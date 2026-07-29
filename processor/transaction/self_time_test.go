@@ -10,6 +10,7 @@ import (
 	tracecore "go.opentelemetry.io/otel/trace"
 )
 
+// newFakeSpan builds a minimal sdktrace.ReadOnlySpan without a TracerProvider.
 func newFakeSpan(spanID, parentID byte, start, end time.Time) sdktrace.ReadOnlySpan {
 	sc := tracecore.NewSpanContext(tracecore.SpanContextConfig{
 		TraceID: tracecore.TraceID{0x01},

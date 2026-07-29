@@ -14,6 +14,7 @@ import (
 	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
+// fakeRootSpan builds a named ReadOnlySpan, optionally tagged cgx.transaction.root.
 func fakeRootSpan(name string, spanID, parentID byte, start, end time.Time, root bool) sdktrace.ReadOnlySpan {
 	stub := sdktracetest.SpanStub{
 		Name: name,
@@ -39,6 +40,7 @@ func fakeRootSpan(name string, spanID, parentID byte, start, end time.Time, root
 }
 
 func TestExtractCompleted_RootsDeepestFirstExcludesExtracted(t *testing.T) {
+	// Outer root first in buffer; deepest-first extract must still peel nested before outer.
 	base := time.Unix(0, 0)
 	outer := fakeRootSpan("outer", 1, 0, base, base.Add(100*time.Millisecond), true)
 	nested := fakeRootSpan("inner", 2, 1, base.Add(10*time.Millisecond), base.Add(60*time.Millisecond), true)

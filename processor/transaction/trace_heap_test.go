@@ -11,6 +11,7 @@ import (
 	tracecore "go.opentelemetry.io/otel/trace"
 )
 
+// newFakeSpanWithParent builds a ReadOnlySpan with an explicit parent SpanContext.
 func newFakeSpanWithParent(spanID byte, parent tracecore.SpanContext, start, end time.Time) sdktrace.ReadOnlySpan {
 	sc := tracecore.NewSpanContext(tracecore.SpanContextConfig{
 		TraceID: tracecore.TraceID{0x01},
