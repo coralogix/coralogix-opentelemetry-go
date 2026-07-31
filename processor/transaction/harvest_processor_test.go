@@ -37,13 +37,19 @@ func TestProcessor_HarvestKeepsOnlySlowestTraceOnForceFlush(t *testing.T) {
 		tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
 	slow.End(tracecore.WithTimestamp(base.Add(200 * time.Millisecond)))
 
-	assert.Empty(t, exporter.GetSpans(), "completed traces must wait for harvest")
+	require.Len(t, exporter.GetSpans(), 1, "displaced fast loser must stub-export immediately")
+	assert.Equal(t, "fast-transaction", exporter.GetSpans()[0].Name)
 
 	require.NoError(t, processor.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 1, "only the slowest trace should survive harvest")
-	assert.Equal(t, "slow-transaction", spans[0].Name)
+	require.Len(t, spans, 2, "slowest full waterfall + stub root for the loser")
+	names := map[string]bool{}
+	for _, s := range spans {
+		names[s.Name] = true
+	}
+	assert.True(t, names["slow-transaction"], "slowest full trace must export")
+	assert.True(t, names["fast-transaction"], "loser must still export a root stub")
 
 	rm, err := reader.Collect(context.Background())
 	require.NoError(t, err)

@@ -554,11 +554,14 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 	}
 
 	p.harvestMu.Lock()
-	p.harvest.witness(harvestTrace{
+	stubs := p.harvest.witness(harvestTrace{
 		durationNs: rootDurationNanos(trimmed),
 		spans:      trimmed,
 	})
 	p.harvestMu.Unlock()
+	if len(stubs) > 0 {
+		p.exportSpans(stubs)
+	}
 }
 
 func (p *TransactionSpanProcessor) stampSelfTimeAndMetrics(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {

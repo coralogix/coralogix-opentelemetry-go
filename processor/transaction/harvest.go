@@ -45,20 +45,20 @@ func newRegularTraceHeap(maxTraces int) *regularTraceHeap {
 	return &regularTraceHeap{maxTraces: maxTraces}
 }
 
-func (r *regularTraceHeap) witness(trace harvestTrace) bool {
+func (r *regularTraceHeap) witness(trace harvestTrace) []sdktrace.ReadOnlySpan {
 	if r.maxTraces <= 0 {
-		return false
+		return nil
 	}
 	if len(r.heap) < r.maxTraces {
 		heap.Push(&r.heap, trace)
-		return true
+		return nil
 	}
 	if trace.durationNs <= r.heap[0].durationNs {
-		return false
+		return harvestStubSpans(trace.spans)
 	}
-	heap.Pop(&r.heap)
+	displaced := heap.Pop(&r.heap).(harvestTrace)
 	heap.Push(&r.heap, trace)
-	return true
+	return harvestStubSpans(displaced.spans)
 }
 
 func (r *regularTraceHeap) drain() []harvestTrace {
@@ -66,6 +66,37 @@ func (r *regularTraceHeap) drain() []harvestTrace {
 	copy(traces, r.heap)
 	r.heap = r.heap[:0]
 	return traces
+}
+
+// harvestStubSpans returns the local-transaction root span(s) for APM presence when
+// a completed tree loses harvest (full waterfall is dropped).
+func harvestStubSpans(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
+	var stubs []sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		for _, a := range s.Attributes() {
+			if a.Key == rootKey && a.Value.AsBool() {
+				stubs = append(stubs, s)
+				break
+			}
+		}
+	}
+	if len(stubs) > 0 {
+		return stubs
+	}
+	// Fallback: longest span in the trimmed batch (should be rare).
+	best := spans[0]
+	bestDur := spanDurationNanos(best)
+	for _, s := range spans[1:] {
+		if d := spanDurationNanos(s); d > bestDur {
+			best = s
+			bestDur = d
+		}
+	}
+	return []sdktrace.ReadOnlySpan{best}
 }
 
 func rootDurationNanos(spans []sdktrace.ReadOnlySpan) int64 {

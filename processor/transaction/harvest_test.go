@@ -17,17 +17,17 @@ import (
 func TestRegularTraceHeap_MaxTracesZeroNeverKeepsAnything(t *testing.T) {
 	h := newRegularTraceHeap(0)
 
-	kept := h.witness(harvestTrace{durationNs: 100})
+	stubs := h.witness(harvestTrace{durationNs: 100, spans: []sdktrace.ReadOnlySpan{stubSpanWithRoot(t, "a", 1, 100, true)}})
 
-	assert.False(t, kept)
+	assert.Nil(t, stubs)
 	assert.Empty(t, h.drain())
 }
 
 func TestRegularTraceHeap_KeepsUpToCapacity(t *testing.T) {
 	h := newRegularTraceHeap(2)
 
-	assert.True(t, h.witness(harvestTrace{durationNs: 10}))
-	assert.True(t, h.witness(harvestTrace{durationNs: 20}))
+	assert.Nil(t, h.witness(harvestTrace{durationNs: 10}))
+	assert.Nil(t, h.witness(harvestTrace{durationNs: 20}))
 
 	drained := h.drain()
 	require.Len(t, drained, 2)
@@ -35,11 +35,20 @@ func TestRegularTraceHeap_KeepsUpToCapacity(t *testing.T) {
 
 func TestRegularTraceHeap_OnlySlowerTraceEvictsShortest(t *testing.T) {
 	h := newRegularTraceHeap(1)
+	first := stubSpanWithRoot(t, "first", 1, 100, true)
+	short := stubSpanWithRoot(t, "short", 2, 50, true)
+	long := stubSpanWithRoot(t, "long", 3, 150, true)
 
-	assert.True(t, h.witness(harvestTrace{durationNs: 100}))
-	assert.False(t, h.witness(harvestTrace{durationNs: 100}))
-	assert.False(t, h.witness(harvestTrace{durationNs: 50}))
-	assert.True(t, h.witness(harvestTrace{durationNs: 150}))
+	assert.Nil(t, h.witness(harvestTrace{durationNs: 100, spans: []sdktrace.ReadOnlySpan{first}}))
+	equalStubs := h.witness(harvestTrace{durationNs: 100, spans: []sdktrace.ReadOnlySpan{stubSpanWithRoot(t, "eq", 4, 100, true)}})
+	require.Len(t, equalStubs, 1)
+	assert.Equal(t, "eq", equalStubs[0].Name())
+	shortStubs := h.witness(harvestTrace{durationNs: 50, spans: []sdktrace.ReadOnlySpan{short}})
+	require.Len(t, shortStubs, 1)
+	assert.Equal(t, "short", shortStubs[0].Name())
+	displaced := h.witness(harvestTrace{durationNs: 150, spans: []sdktrace.ReadOnlySpan{long}})
+	require.Len(t, displaced, 1)
+	assert.Equal(t, "first", displaced[0].Name(), "evicted previous winner must stub")
 
 	drained := h.drain()
 	require.Len(t, drained, 1)
@@ -68,6 +77,16 @@ func TestRegularTraceHeap_KeepsSlowestNOfManyCompetitors(t *testing.T) {
 	got := map[int64]bool{drained[0].durationNs: true, drained[1].durationNs: true}
 	assert.True(t, got[100], "slowest trace must survive")
 	assert.True(t, got[50], "second slowest trace must survive")
+}
+
+func TestHarvestStubSpans_PrefersTransactionRoot(t *testing.T) {
+	root := stubSpanWithRoot(t, "root", 1, 100, true)
+	child := stubSpanWithRoot(t, "child", 2, 500, false)
+
+	stubs := harvestStubSpans([]sdktrace.ReadOnlySpan{root, child})
+
+	require.Len(t, stubs, 1)
+	assert.Equal(t, "root", stubs[0].Name())
 }
 
 func TestRootDurationNanos_UsesTransactionRootSpanWhenPresent(t *testing.T) {
