@@ -2,32 +2,24 @@ package transaction
 
 import (
 	"container/heap"
-	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"go.opentelemetry.io/otel/attribute"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
-// DefaultMaxRegularTraces is the default harvest capacity.
-const DefaultMaxRegularTraces = 1
+// regularTraceMinHeap is a min-heap by root duration (nanoseconds).
+// Head is the shortest / easiest to displace when the harvest capacity is full.
+// container/heap provides sift-up / sift-down; see also slowestSpanMinHeap.
+type regularTraceMinHeap []harvestTrace
 
-// DefaultHarvestPeriod is the default harvest flush interval.
-const DefaultHarvestPeriod = 60 * time.Second
-
-type harvestTrace struct {
-	durationNs int64
-	spans      []sdktrace.ReadOnlySpan
-}
-
-type harvestMinHeap []harvestTrace
-
-func (h harvestMinHeap) Len() int           { return len(h) }
-func (h harvestMinHeap) Less(i, j int) bool { return h[i].durationNs < h[j].durationNs }
-func (h harvestMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *harvestMinHeap) Push(x any)        { *h = append(*h, x.(harvestTrace)) }
-func (h *harvestMinHeap) Pop() any {
+func (h regularTraceMinHeap) Len() int           { return len(h) }
+func (h regularTraceMinHeap) Less(i, j int) bool { return h[i].durationNs < h[j].durationNs }
+func (h regularTraceMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *regularTraceMinHeap) Push(x any)        { *h = append(*h, x.(harvestTrace)) }
+func (h *regularTraceMinHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
@@ -35,10 +27,15 @@ func (h *harvestMinHeap) Pop() any {
 	return item
 }
 
+type harvestTrace struct {
+	durationNs int64
+	spans      []sdktrace.ReadOnlySpan
+}
+
 // regularTraceHeap is not safe for concurrent use; TransactionSpanProcessor guards with harvestMu.
 type regularTraceHeap struct {
 	maxTraces int
-	heap      harvestMinHeap
+	heap      regularTraceMinHeap
 }
 
 func newRegularTraceHeap(maxTraces int) *regularTraceHeap {

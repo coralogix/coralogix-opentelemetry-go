@@ -60,8 +60,8 @@ func TestIntegration_ProcessorOnly(t *testing.T) {
 	assertNoAttribute(t, child.Attributes, sampler.TransactionIdentifierRoot)
 	assertNoAttribute(t, child.Attributes, sampler.DistributedTransactionIdentifier)
 
-	assertFloat64Attribute(t, root.Attributes, SelfTimeAttribute, 0.04)
-	assertFloat64Attribute(t, child.Attributes, SelfTimeAttribute, 0.06)
+	assertFloat64Attribute(t, root.Attributes, SelfDurationAttribute, 0.04)
+	assertFloat64Attribute(t, child.Attributes, SelfDurationAttribute, 0.06)
 }
 
 func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T) {
@@ -105,7 +105,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	inner := findSpan(t, beforeOuterEnds, "inner-server")
 	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
 	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
-	assertFloat64Attribute(t, inner.Attributes, SelfTimeAttribute, 0.02)
+	assertFloat64Attribute(t, inner.Attributes, SelfDurationAttribute, 0.02)
 
 	_, outerChild := tracer.Start(outerCtx, "outer-child",
 		tracecore.WithTimestamp(base.Add(70*time.Millisecond)),
@@ -119,7 +119,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	outer := findSpan(t, spans, "outer-server")
 	assertAttribute(t, outer.Attributes, sampler.TransactionIdentifier, "outer-server")
 	assertBoolAttribute(t, outer.Attributes, sampler.TransactionIdentifierRoot, true)
-	assertFloat64Attribute(t, outer.Attributes, SelfTimeAttribute, 0.03)
+	assertFloat64Attribute(t, outer.Attributes, SelfDurationAttribute, 0.03)
 
 	outerChildStub := findSpan(t, spans, "outer-child")
 	assertAttribute(t, outerChildStub.Attributes, sampler.TransactionIdentifier, "outer-server")

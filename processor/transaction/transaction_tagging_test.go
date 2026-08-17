@@ -145,6 +145,28 @@ func TestTagTransaction_PreservesPreSetTransactionName(t *testing.T) {
 	assertBoolAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot, true)
 }
 
+func TestTagTransaction_UsesFinalSpanNameAfterUpdateName(t *testing.T) {
+	exporter, tracer, shutdown := newTracerProvider(t)
+	defer shutdown()
+
+	ctx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	_, child := tracer.Start(ctx, "handler")
+	root.SetName("GET /myroute")
+	child.End()
+	root.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	rootStub := findSpan(t, spans, "GET /myroute")
+	childStub := findSpan(t, spans, "handler")
+	assertAttribute(t, rootStub.Attributes, sampler.TransactionIdentifier, "GET /myroute")
+	assertBoolAttribute(t, rootStub.Attributes, sampler.TransactionIdentifierRoot, true)
+	assertAttribute(t, childStub.Attributes, sampler.TransactionIdentifier, "GET /myroute")
+	assertNoAttribute(t, childStub.Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func findSpan(t *testing.T, spans []sdktracetest.SpanStub, name string) *sdktracetest.SpanStub {
 	t.Helper()
 	for i := range spans {

@@ -53,7 +53,7 @@ func TestProcessor_HarvestKeepsOnlySlowestTraceOnForceFlush(t *testing.T) {
 
 	rm, err := reader.Collect(context.Background())
 	require.NoError(t, err)
-	dataPoints := findHistogramDataPoints(t, rm, SelfTimeMetricName)
+	dataPoints := findHistogramDataPoints(t, rm, SelfDurationMetricName)
 	require.Len(t, dataPoints, 2, "self-time metric must be recorded for every completed trace")
 
 	require.NoError(t, tp.Shutdown(context.Background()))

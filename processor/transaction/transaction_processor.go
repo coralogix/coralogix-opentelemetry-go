@@ -1,16 +1,24 @@
 // Package transaction provides TransactionSpanProcessor: tags Coralogix
-// transactions, stamps self-time, and records cgx.transaction.self_time.
+// transactions, stamps exclusive self-duration, and records
+// cgx.transaction.self_duration.
+//
+// Flow:
+//   - OnStart: decide new vs inherit (SERVER / CONSUMER / remote / no local
+//     parent txn). Mark cgx.transaction.root on new roots. Track membership.
+//     Do not freeze cgx.transaction from the early span name.
+//   - OnEnd / holdback: buffer until local transaction trees complete.
+//   - acceptCompleted (export finalize): stamp cgx.transaction from the root's
+//     final Name() (or pre-set override), stamp self-duration + metrics, trim
+//     to maxNodes, then harvest or export.
 package transaction
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/global"
 	"go.opentelemetry.io/otel/metric/instrument"
@@ -18,14 +26,12 @@ import (
 	"go.opentelemetry.io/otel/metric/unit"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	tracecore "go.opentelemetry.io/otel/trace"
-
-	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
 const (
-	SelfTimeAttribute       = "cgx.transaction.self_time"
-	SelfTimeMetricName      = "cgx.transaction.self_time"
-	SelfTimeMetricUnit      = unit.Unit("s")
+	SelfDurationAttribute   = "cgx.transaction.self_duration"
+	SelfDurationMetricName  = "cgx.transaction.self_duration"
+	SelfDurationMetricUnit  = unit.Unit("s")
 	SpanNameMetricAttribute = "span.name"
 
 	instrumentationName = "github.com/coralogix/coralogix-opentelemetry-go/processor/transaction"
@@ -34,6 +40,7 @@ const (
 type traceBuffer struct {
 	spans         []sdktrace.ReadOnlySpan
 	liveParents   map[tracecore.SpanID]tracecore.SpanID
+	tracked       map[tracecore.SpanID]struct{} // local-txn membership for OnStart inherit detection
 	completeTimer *time.Timer
 }
 
@@ -41,45 +48,8 @@ func (tb *traceBuffer) liveCount() int {
 	return len(tb.liveParents)
 }
 
-func (tb *traceBuffer) safeEndedSpans() []sdktrace.ReadOnlySpan {
-	if tb.liveCount() == 0 {
-		return tb.spans
-	}
-
-	parentOf := make(map[tracecore.SpanID]tracecore.SpanID, len(tb.spans)+len(tb.liveParents))
-	for _, s := range tb.spans {
-		if pid := s.Parent().SpanID(); pid.IsValid() {
-			parentOf[s.SpanContext().SpanID()] = pid
-		}
-	}
-	for id, parentID := range tb.liveParents {
-		if parentID.IsValid() {
-			parentOf[id] = parentID
-		}
-	}
-
-	blocked := make(map[tracecore.SpanID]struct{})
-	for liveID := range tb.liveParents {
-		cur, ok := parentOf[liveID]
-		for ok && cur.IsValid() {
-			if _, seen := blocked[cur]; seen {
-				break
-			}
-			blocked[cur] = struct{}{}
-			cur, ok = parentOf[cur]
-		}
-	}
-
-	out := make([]sdktrace.ReadOnlySpan, 0, len(tb.spans))
-	for _, s := range tb.spans {
-		if _, skip := blocked[s.SpanContext().SpanID()]; skip {
-			continue
-		}
-		out = append(out, s)
-	}
-	return out
-}
-
+// TransactionSpanProcessor wraps a SpanExporter to tag Coralogix transactions,
+// stamp cgx.transaction.self_duration, trim, and harvest slowest local traces.
 type TransactionSpanProcessor struct {
 	exporter sdktrace.SpanExporter
 
@@ -87,7 +57,7 @@ type TransactionSpanProcessor struct {
 	traces         map[tracecore.TraceID]*traceBuffer
 	childIntervals map[tracecore.SpanID][]interval
 
-	selfTimeHistogram syncfloat64.Histogram
+	selfDurationHistogram syncfloat64.Histogram
 
 	maxNodes           int
 	maxRegularTraces   int
@@ -115,14 +85,14 @@ type TransactionSpanProcessor struct {
 
 type Option func(*TransactionSpanProcessor)
 
-// WithMeterProvider sets the MeterProvider for cgx.transaction.self_time.
+// WithMeterProvider sets the MeterProvider for cgx.transaction.self_duration.
 func WithMeterProvider(meterProvider metric.MeterProvider) Option {
 	return func(p *TransactionSpanProcessor) {
 		if meterProvider == nil {
 			return
 		}
-		if histogram := newSelfTimeHistogram(meterProvider); histogram != nil {
-			p.selfTimeHistogram = histogram
+		if histogram := newSelfDurationHistogram(meterProvider); histogram != nil {
+			p.selfDurationHistogram = histogram
 		}
 	}
 }
@@ -134,7 +104,11 @@ func WithMaxNodes(maxNodes int) Option {
 	}
 }
 
-// WithMaxRegularTraces caps completed traces held until harvest (0 exports immediately).
+// WithMaxRegularTraces caps completed traces held until harvest.
+// Default 1 keeps only the slowest completed local waterfall(s) per harvest
+// window; losers are stub-exported (root only). Self-duration metrics are still
+// recorded for every completed local trace. 0 exports every completed trimmed
+// trace immediately.
 func WithMaxRegularTraces(maxRegularTraces int) Option {
 	return func(p *TransactionSpanProcessor) {
 		p.maxRegularTraces = maxRegularTraces
@@ -148,9 +122,6 @@ func WithHarvestPeriod(period time.Duration) Option {
 	}
 }
 
-// DefaultCompletionHoldback is the post-idle delay before finalizing a local trace.
-const DefaultCompletionHoldback = 100 * time.Millisecond
-
 // WithCompletionHoldback sets the post-idle delay before finalizing a local trace.
 func WithCompletionHoldback(d time.Duration) Option {
 	return func(p *TransactionSpanProcessor) {
@@ -158,12 +129,12 @@ func WithCompletionHoldback(d time.Duration) Option {
 	}
 }
 
-func newSelfTimeHistogram(meterProvider metric.MeterProvider) syncfloat64.Histogram {
+func newSelfDurationHistogram(meterProvider metric.MeterProvider) syncfloat64.Histogram {
 	meter := meterProvider.Meter(instrumentationName)
 	histogram, err := meter.SyncFloat64().Histogram(
-		SelfTimeMetricName,
-		instrument.WithUnit(SelfTimeMetricUnit),
-		instrument.WithDescription("Exclusive self time per span within a Coralogix transaction"),
+		SelfDurationMetricName,
+		instrument.WithUnit(SelfDurationMetricUnit),
+		instrument.WithDescription("Exclusive self duration per span within a Coralogix transaction"),
 	)
 	if err != nil {
 		otel.Handle(err)
@@ -172,22 +143,25 @@ func newSelfTimeHistogram(meterProvider metric.MeterProvider) syncfloat64.Histog
 	return histogram
 }
 
+// NewTransactionSpanProcessor builds a processor. Options override env vars;
+// unset options fall back to OTEL_CX_TRANSACTION_* then package defaults.
 func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option) *TransactionSpanProcessor {
+	maxNodes, maxRegularTraces, harvestPeriod, completionHoldback := defaultsFromEnv()
 	p := &TransactionSpanProcessor{
 		exporter:           exporter,
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
 		childIntervals:     make(map[tracecore.SpanID][]interval),
-		maxNodes:           DefaultMaxNodes,
-		maxRegularTraces:   DefaultMaxRegularTraces,
-		harvestPeriod:      DefaultHarvestPeriod,
-		completionHoldback: DefaultCompletionHoldback,
+		maxNodes:           maxNodes,
+		maxRegularTraces:   maxRegularTraces,
+		harvestPeriod:      harvestPeriod,
+		completionHoldback: completionHoldback,
 	}
 	p.idle = sync.NewCond(&p.mu)
 	for _, opt := range opts {
 		opt(p)
 	}
-	if p.selfTimeHistogram == nil {
-		p.selfTimeHistogram = newSelfTimeHistogram(global.MeterProvider())
+	if p.selfDurationHistogram == nil {
+		p.selfDurationHistogram = newSelfDurationHistogram(global.MeterProvider())
 	}
 	p.harvest = newRegularTraceHeap(p.maxRegularTraces)
 	if p.maxRegularTraces > 0 && p.harvestPeriod > 0 {
@@ -222,38 +196,48 @@ func (p *TransactionSpanProcessor) stopHarvester() {
 	<-p.harvestDone
 }
 
+// OnStart decides new vs inherit and marks roots. Transaction names are stamped
+// later in acceptCompleted from the root's final Name() (or override).
 func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadWriteSpan) {
-	tagTransaction(ctx, s)
-
 	traceID := s.SpanContext().TraceID()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	var tracked map[tracecore.SpanID]struct{}
+	tb, ok := p.traces[traceID]
 	if p.exporterShutdown.Load() {
+		beginTransaction(ctx, s, nil)
 		return
 	}
-	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
-	if p.stopped {
-		tb, ok := p.traces[traceID]
-		if !ok {
+	if !ok {
+		if p.stopped {
+			beginTransaction(ctx, s, nil)
 			return
 		}
-		p.stopCompleteTimerLocked(tb)
-		if tb.liveParents == nil {
-			tb.liveParents = make(map[tracecore.SpanID]tracecore.SpanID)
+		tb = &traceBuffer{
+			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
+			tracked:     make(map[tracecore.SpanID]struct{}),
 		}
-		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
-		return
-	}
-	tb, ok := p.traces[traceID]
-	if !ok {
-		tb = &traceBuffer{liveParents: make(map[tracecore.SpanID]tracecore.SpanID)}
 		p.traces[traceID] = tb
 	}
-	p.stopCompleteTimerLocked(tb)
+	if tb.tracked == nil {
+		tb.tracked = make(map[tracecore.SpanID]struct{})
+	}
 	if tb.liveParents == nil {
 		tb.liveParents = make(map[tracecore.SpanID]tracecore.SpanID)
 	}
+	tracked = tb.tracked
+	beginTransaction(ctx, s, tracked)
+
+	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
+	if p.stopped {
+		p.stopCompleteTimerLocked(tb)
+		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
+		return
+	}
+
+	p.stopCompleteTimerLocked(tb)
 	tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
 }
 
@@ -271,9 +255,13 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 			p.mu.Unlock()
 			return
 		}
-		tb = &traceBuffer{liveParents: make(map[tracecore.SpanID]tracecore.SpanID)}
+		tb = &traceBuffer{
+			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
+			tracked:     make(map[tracecore.SpanID]struct{}),
+		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
+		tb.tracked[s.SpanContext().SpanID()] = struct{}{}
 	}
 
 	if parent := s.Parent(); parent.IsValid() {
@@ -308,213 +296,6 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	}
 }
 
-func (p *TransactionSpanProcessor) extractCompletedLocalTransactionsLocked(tb *traceBuffer, flushLeftover bool) [][]sdktrace.ReadOnlySpan {
-	if len(tb.spans) == 0 {
-		return nil
-	}
-
-	parentOf := make(map[tracecore.SpanID]tracecore.SpanID, len(tb.spans)+len(tb.liveParents))
-	for _, s := range tb.spans {
-		if pid := s.Parent().SpanID(); pid.IsValid() {
-			parentOf[s.SpanContext().SpanID()] = pid
-		}
-	}
-	for id, pid := range tb.liveParents {
-		if pid.IsValid() {
-			parentOf[id] = pid
-		}
-	}
-
-	underRoot := func(spanID, rootID tracecore.SpanID) bool {
-		cur := spanID
-		seen := make(map[tracecore.SpanID]struct{})
-		for cur.IsValid() {
-			if _, done := seen[cur]; done {
-				break
-			}
-			if cur == rootID {
-				return true
-			}
-			seen[cur] = struct{}{}
-			next, ok := parentOf[cur]
-			if !ok {
-				break
-			}
-			cur = next
-		}
-		return false
-	}
-
-	hasLiveInSubtree := func(rootID tracecore.SpanID) bool {
-		if _, ok := tb.liveParents[rootID]; ok {
-			return true
-		}
-		for liveID := range tb.liveParents {
-			if underRoot(liveID, rootID) {
-				return true
-			}
-		}
-		return false
-	}
-
-	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
-	var roots []tracecore.SpanID
-	for _, s := range tb.spans {
-		for _, a := range s.Attributes() {
-			if a.Key == rootKey && a.Value.AsBool() {
-				roots = append(roots, s.SpanContext().SpanID())
-				break
-			}
-		}
-	}
-
-	rootDepth := func(rootID tracecore.SpanID) int {
-		depth := 0
-		cur := rootID
-		seen := make(map[tracecore.SpanID]struct{})
-		for cur.IsValid() {
-			if _, done := seen[cur]; done {
-				break
-			}
-			seen[cur] = struct{}{}
-			next, ok := parentOf[cur]
-			if !ok || !next.IsValid() {
-				break
-			}
-			depth++
-			cur = next
-		}
-		return depth
-	}
-
-	sort.SliceStable(roots, func(i, j int) bool {
-		return rootDepth(roots[i]) > rootDepth(roots[j])
-	})
-
-	var batches [][]sdktrace.ReadOnlySpan
-	extracted := make(map[tracecore.SpanID]struct{})
-
-	for _, rootID := range roots {
-		if _, done := extracted[rootID]; done {
-			continue
-		}
-		if hasLiveInSubtree(rootID) {
-			continue
-		}
-		var subtree []sdktrace.ReadOnlySpan
-		for _, s := range tb.spans {
-			sid := s.SpanContext().SpanID()
-			if _, done := extracted[sid]; done {
-				continue
-			}
-			if underRoot(sid, rootID) {
-				subtree = append(subtree, s)
-			}
-		}
-		if len(subtree) == 0 {
-			continue
-		}
-		for _, s := range subtree {
-			extracted[s.SpanContext().SpanID()] = struct{}{}
-		}
-		batches = append(batches, subtree)
-	}
-
-	if len(extracted) > 0 {
-		remaining := make([]sdktrace.ReadOnlySpan, 0, len(tb.spans)-len(extracted))
-		for _, s := range tb.spans {
-			if _, done := extracted[s.SpanContext().SpanID()]; !done {
-				remaining = append(remaining, s)
-			}
-		}
-		tb.spans = remaining
-	}
-
-	if flushLeftover && tb.liveCount() == 0 && len(tb.spans) > 0 {
-		batches = append(batches, tb.spans)
-		tb.spans = nil
-	}
-
-	return batches
-}
-
-func (p *TransactionSpanProcessor) stopCompleteTimerLocked(tb *traceBuffer) {
-	if tb.completeTimer != nil {
-		tb.completeTimer.Stop()
-		tb.completeTimer = nil
-	}
-}
-
-func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {
-	p.stopCompleteTimerLocked(tb)
-	if p.completionHoldback <= 0 {
-		batches := p.extractCompletedLocalTransactionsLocked(tb, true)
-		if len(tb.spans) == 0 {
-			delete(p.traces, traceID)
-		}
-		return batches
-	}
-	var timer *time.Timer
-	timer = time.AfterFunc(p.completionHoldback, func() {
-		p.mu.Lock()
-		if p.exporterShutdown.Load() {
-			p.mu.Unlock()
-			return
-		}
-		cur, ok := p.traces[traceID]
-		// Ignore stale firings: only the currently armed timer may finalize.
-		if !ok || cur.liveCount() > 0 || cur.completeTimer != timer {
-			p.mu.Unlock()
-			return
-		}
-		cur.completeTimer = nil
-		batches := p.extractCompletedLocalTransactionsLocked(cur, true)
-		if len(cur.spans) == 0 {
-			delete(p.traces, traceID)
-		}
-		p.pendingFinalize += len(batches)
-		p.mu.Unlock()
-
-		for _, batch := range batches {
-			p.acceptCompleted(batch)
-			p.mu.Lock()
-			p.pendingFinalize--
-			p.idle.Broadcast()
-			p.mu.Unlock()
-		}
-	})
-	tb.completeTimer = timer
-	return nil
-}
-
-func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
-	for {
-		var batches [][]sdktrace.ReadOnlySpan
-		for id, tb := range p.traces {
-			if tb.liveCount() > 0 {
-				continue
-			}
-			p.stopCompleteTimerLocked(tb)
-			batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, true)...)
-			if len(tb.spans) == 0 {
-				delete(p.traces, id)
-			}
-		}
-		if len(batches) == 0 {
-			p.idle.Broadcast()
-			return
-		}
-		p.pendingFinalize += len(batches)
-		for _, spans := range batches {
-			p.mu.Unlock()
-			p.acceptCompleted(spans)
-			p.mu.Lock()
-			p.pendingFinalize--
-		}
-		p.idle.Broadcast()
-	}
-}
-
 func (p *TransactionSpanProcessor) totalLiveLocked() int {
 	return p.pendingFinalize + p.liveSpanCountLocked()
 }
@@ -525,171 +306,6 @@ func (p *TransactionSpanProcessor) liveSpanCountLocked() int {
 		n += tb.liveCount()
 	}
 	return n
-}
-
-func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan) {
-	if len(spans) == 0 {
-		return
-	}
-	defer p.popChildIntervals(spans)
-
-	stamped := p.stampSelfTimeAndMetrics(spans)
-
-	trimmed := selectSlowestSpans(stamped, p.maxNodes, findTransactionRootSpanIDs(stamped)...)
-	if len(trimmed) == 0 {
-		return
-	}
-
-	if p.maxRegularTraces <= 0 || p.harvestPeriod <= 0 {
-		p.exportSpans(trimmed)
-		return
-	}
-
-	p.mu.Lock()
-	stopped := p.stopped || p.exporterShutdown.Load()
-	p.mu.Unlock()
-	if stopped {
-		p.exportSpans(trimmed)
-		return
-	}
-
-	p.harvestMu.Lock()
-	stubs := p.harvest.witness(harvestTrace{
-		durationNs: rootDurationNanos(trimmed),
-		spans:      trimmed,
-	})
-	p.harvestMu.Unlock()
-	if len(stubs) > 0 {
-		p.exportSpans(stubs)
-	}
-}
-
-func (p *TransactionSpanProcessor) stampSelfTimeAndMetrics(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
-	byParent := childrenByParentSpanID(spans)
-
-	p.mu.Lock()
-	prior := make(map[tracecore.SpanID][]interval, len(spans))
-	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		if ivs := p.childIntervals[sid]; len(ivs) > 0 {
-			prior[sid] = append([]interval(nil), ivs...)
-		}
-	}
-	p.mu.Unlock()
-
-	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
-	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		children := byParent[sid]
-		extra := filterPriorIntervals(prior[sid], children)
-		selfTimeNs := selfTimeNanosWithExtraIntervals(s, children, extra)
-		stamped := withSelfTime(s, selfTimeNs)
-		out = append(out, stamped)
-		p.recordSelfTimeMetric(stamped, selfTimeNs)
-	}
-	return out
-}
-
-func filterPriorIntervals(prior []interval, children []sdktrace.ReadOnlySpan) []interval {
-	if len(prior) == 0 {
-		return nil
-	}
-	out := make([]interval, 0, len(prior))
-	for _, iv := range prior {
-		dup := false
-		for _, c := range children {
-			if c.StartTime().UnixNano() == iv.start && c.EndTime().UnixNano() == iv.end {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			out = append(out, iv)
-		}
-	}
-	return out
-}
-
-func (p *TransactionSpanProcessor) popChildIntervals(spans []sdktrace.ReadOnlySpan) {
-	p.mu.Lock()
-	for _, s := range spans {
-		delete(p.childIntervals, s.SpanContext().SpanID())
-	}
-	p.mu.Unlock()
-}
-
-func findTransactionRootSpanIDs(spans []sdktrace.ReadOnlySpan) []tracecore.SpanID {
-	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
-	var roots []tracecore.SpanID
-	for _, s := range spans {
-		for _, a := range s.Attributes() {
-			if a.Key == rootKey && a.Value.AsBool() {
-				roots = append(roots, s.SpanContext().SpanID())
-				break
-			}
-		}
-	}
-	return roots
-}
-
-func (p *TransactionSpanProcessor) flushHarvest() {
-	// Hold exportMu across drain+export so Shutdown cannot shut down between them.
-	p.exportMu.Lock()
-	defer p.exportMu.Unlock()
-	if p.exporterShutdown.Load() {
-		return
-	}
-	p.harvestMu.Lock()
-	winners := p.harvest.drain()
-	p.harvestMu.Unlock()
-
-	ctx := p.exportCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	for _, w := range winners {
-		if p.exporter == nil || len(w.spans) == 0 {
-			continue
-		}
-		if err := p.exporter.ExportSpans(ctx, w.spans); err != nil {
-			otel.Handle(err)
-		}
-	}
-}
-
-func (p *TransactionSpanProcessor) exportSpans(spans []sdktrace.ReadOnlySpan) {
-	if p.exporter == nil || len(spans) == 0 {
-		return
-	}
-	// Only exportMu — never p.mu (Shutdown may hold p.mu waiting pendingFinalize).
-	p.exportMu.Lock()
-	defer p.exportMu.Unlock()
-	if p.exporterShutdown.Load() {
-		return
-	}
-	ctx := p.exportCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := p.exporter.ExportSpans(ctx, spans); err != nil {
-		otel.Handle(err)
-	}
-}
-
-func (p *TransactionSpanProcessor) recordSelfTimeMetric(span sdktrace.ReadOnlySpan, selfTimeNs int64) {
-	if p.selfTimeHistogram == nil {
-		return
-	}
-
-	attrs := make([]attribute.KeyValue, 0, 3)
-	attrs = append(attrs, attribute.String(SpanNameMetricAttribute, span.Name()))
-	for _, a := range span.Attributes() {
-		if a.Key == attribute.Key(sampler.TransactionIdentifier) || a.Key == attribute.Key(sampler.TransactionIdentifierRoot) {
-			attrs = append(attrs, a)
-		}
-	}
-
-	p.selfTimeHistogram.Record(context.Background(), float64(selfTimeNs)/float64(1e9), attrs...)
 }
 
 func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {

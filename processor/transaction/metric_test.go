@@ -19,7 +19,7 @@ import (
 	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
-func TestWithMeterProvider_RecordsSelfTimeHistogram(t *testing.T) {
+func TestWithMeterProvider_RecordsSelfDurationHistogram(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	meterProvider := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
 
@@ -45,7 +45,7 @@ func TestWithMeterProvider_RecordsSelfTimeHistogram(t *testing.T) {
 	rm, err := reader.Collect(context.Background())
 	require.NoError(t, err)
 
-	dataPoints := findHistogramDataPoints(t, rm, SelfTimeMetricName)
+	dataPoints := findHistogramDataPoints(t, rm, SelfDurationMetricName)
 	require.Len(t, dataPoints, 2)
 
 	seen := map[string]metricdata.HistogramDataPoint{}
@@ -95,7 +95,7 @@ func TestNewTransactionSpanProcessor_FallsBackToGlobalMeterProvider(t *testing.T
 	rm, err := reader.Collect(context.Background())
 	require.NoError(t, err)
 
-	dataPoints := findHistogramDataPoints(t, rm, SelfTimeMetricName)
+	dataPoints := findHistogramDataPoints(t, rm, SelfDurationMetricName)
 	require.Len(t, dataPoints, 1)
 }
 

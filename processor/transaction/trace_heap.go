@@ -7,9 +7,6 @@ import (
 	tracecore "go.opentelemetry.io/otel/trace"
 )
 
-// DefaultMaxNodes is 256.
-const DefaultMaxNodes = 256
-
 func spanDurationNanos(span sdktrace.ReadOnlySpan) int64 {
 	d := span.EndTime().Sub(span.StartTime()).Nanoseconds()
 	if d < 0 {
@@ -24,18 +21,21 @@ type spanHeapItem struct {
 	span     sdktrace.ReadOnlySpan
 }
 
-type spanMinHeap []spanHeapItem
+// slowestSpanMinHeap is a min-heap by span duration. Head is the shortest kept
+// span — displace it when a slower candidate appears. container/heap provides
+// sift-up / sift-down (same pattern as regularTraceMinHeap in harvest.go).
+type slowestSpanMinHeap []spanHeapItem
 
-func (h spanMinHeap) Len() int { return len(h) }
-func (h spanMinHeap) Less(i, j int) bool {
+func (h slowestSpanMinHeap) Len() int { return len(h) }
+func (h slowestSpanMinHeap) Less(i, j int) bool {
 	if h[i].duration != h[j].duration {
 		return h[i].duration < h[j].duration
 	}
 	return h[i].index < h[j].index
 }
-func (h spanMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *spanMinHeap) Push(x any)   { *h = append(*h, x.(spanHeapItem)) }
-func (h *spanMinHeap) Pop() any {
+func (h slowestSpanMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *slowestSpanMinHeap) Push(x any)   { *h = append(*h, x.(spanHeapItem)) }
+func (h *slowestSpanMinHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
@@ -43,7 +43,9 @@ func (h *spanMinHeap) Pop() any {
 	return item
 }
 
-func selectSlowestSpans(spans []sdktrace.ReadOnlySpan, maxNodes int, protectedRoots ...tracecore.SpanID) []sdktrace.ReadOnlySpan {
+// selectSlowestSpans keeps at most maxNodes spans (slowest first). protectedRoots
+// are always retained. Dropped spans are reparented to the nearest kept ancestor.
+func selectSlowestSpans(spans []sdktrace.ReadOnlySpan, maxNodes int, protectedRoots []tracecore.SpanID) []sdktrace.ReadOnlySpan {
 	if maxNodes <= 0 || len(spans) <= maxNodes {
 		return spans
 	}
@@ -73,7 +75,7 @@ func selectSlowestSpans(spans []sdktrace.ReadOnlySpan, maxNodes int, protectedRo
 		return reparentToKeptAncestors(orderKept(spans, roots), spans)
 	}
 
-	h := make(spanMinHeap, 0, slots)
+	h := make(slowestSpanMinHeap, 0, slots)
 	for i, s := range others {
 		item := spanHeapItem{duration: spanDurationNanos(s), index: i, span: s}
 		if len(h) < slots {

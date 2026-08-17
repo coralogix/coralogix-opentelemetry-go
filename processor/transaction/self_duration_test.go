@@ -31,23 +31,23 @@ func newFakeSpan(spanID, parentID byte, start, end time.Time) sdktrace.ReadOnlyS
 	return stub.Snapshot()
 }
 
-func TestSelfTimeNanos(t *testing.T) {
+func TestSelfDurationNanos(t *testing.T) {
 	base := time.Unix(0, 0)
 
-	t.Run("leaf span with no children has self time equal to its duration", func(t *testing.T) {
+	t.Run("leaf span with no children has self duration equal to its duration", func(t *testing.T) {
 		leaf := newFakeSpan(2, 1, base.Add(20*time.Millisecond), base.Add(80*time.Millisecond))
 
-		self := selfTimeNanos(leaf, nil)
+		self := selfDurationNanos(leaf, nil)
 
 		assert.Equal(t, int64(60*time.Millisecond), self)
 	})
 
-	t.Run("parent 0-100 with single child 20-80 has self time 40ms and child 60ms", func(t *testing.T) {
+	t.Run("parent 0-100 with single child 20-80 has self duration 40ms and child 60ms", func(t *testing.T) {
 		parent := newFakeSpan(1, 0, base, base.Add(100*time.Millisecond))
 		child := newFakeSpan(2, 1, base.Add(20*time.Millisecond), base.Add(80*time.Millisecond))
 
-		parentSelf := selfTimeNanos(parent, []sdktrace.ReadOnlySpan{child})
-		childSelf := selfTimeNanos(child, nil)
+		parentSelf := selfDurationNanos(parent, []sdktrace.ReadOnlySpan{child})
+		childSelf := selfDurationNanos(child, nil)
 
 		assert.Equal(t, int64(40*time.Millisecond), parentSelf)
 		assert.Equal(t, int64(60*time.Millisecond), childSelf)
@@ -58,7 +58,7 @@ func TestSelfTimeNanos(t *testing.T) {
 		childA := newFakeSpan(2, 1, base.Add(10*time.Millisecond), base.Add(50*time.Millisecond))
 		childB := newFakeSpan(3, 1, base.Add(30*time.Millisecond), base.Add(70*time.Millisecond))
 
-		self := selfTimeNanos(parent, []sdktrace.ReadOnlySpan{childA, childB})
+		self := selfDurationNanos(parent, []sdktrace.ReadOnlySpan{childA, childB})
 
 		assert.Equal(t, int64(40*time.Millisecond), self)
 	})
@@ -68,7 +68,7 @@ func TestSelfTimeNanos(t *testing.T) {
 		childA := newFakeSpan(2, 1, base.Add(0*time.Millisecond), base.Add(20*time.Millisecond))
 		childB := newFakeSpan(3, 1, base.Add(50*time.Millisecond), base.Add(70*time.Millisecond))
 
-		self := selfTimeNanos(parent, []sdktrace.ReadOnlySpan{childA, childB})
+		self := selfDurationNanos(parent, []sdktrace.ReadOnlySpan{childA, childB})
 
 		assert.Equal(t, int64(60*time.Millisecond), self)
 	})
@@ -77,16 +77,16 @@ func TestSelfTimeNanos(t *testing.T) {
 		parent := newFakeSpan(1, 0, base.Add(10*time.Millisecond), base.Add(90*time.Millisecond))
 		child := newFakeSpan(2, 1, base, base.Add(200*time.Millisecond))
 
-		self := selfTimeNanos(parent, []sdktrace.ReadOnlySpan{child})
+		self := selfDurationNanos(parent, []sdktrace.ReadOnlySpan{child})
 
 		assert.Equal(t, int64(0), self)
 	})
 
-	t.Run("self time never goes negative", func(t *testing.T) {
+	t.Run("self duration never goes negative", func(t *testing.T) {
 		parent := newFakeSpan(1, 0, base, base)
 		child := newFakeSpan(2, 1, base, base.Add(10*time.Millisecond))
 
-		self := selfTimeNanos(parent, []sdktrace.ReadOnlySpan{child})
+		self := selfDurationNanos(parent, []sdktrace.ReadOnlySpan{child})
 
 		assert.Equal(t, int64(0), self)
 	})

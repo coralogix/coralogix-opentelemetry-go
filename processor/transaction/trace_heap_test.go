@@ -39,7 +39,7 @@ func TestSelectSlowestSpans_NoTrimWhenUnderLimit(t *testing.T) {
 	child := newFakeSpanWithParent(2, spanCtx(1), base, base.Add(10*time.Millisecond))
 
 	spans := []sdktrace.ReadOnlySpan{root, child}
-	out := selectSlowestSpans(spans, 256, spanCtx(1).SpanID())
+	out := selectSlowestSpans(spans, 256, []tracecore.SpanID{spanCtx(1).SpanID()})
 
 	require.Len(t, out, 2)
 	assert.Equal(t, tracecore.SpanID{1}, out[0].SpanContext().SpanID())
@@ -52,8 +52,8 @@ func TestSelectSlowestSpans_MaxNodesZeroOrNegativeDisablesTrim(t *testing.T) {
 	child := newFakeSpanWithParent(2, spanCtx(1), base, base.Add(10*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{root, child}
 
-	assert.Equal(t, spans, selectSlowestSpans(spans, 0, spanCtx(1).SpanID()))
-	assert.Equal(t, spans, selectSlowestSpans(spans, -1, spanCtx(1).SpanID()))
+	assert.Equal(t, spans, selectSlowestSpans(spans, 0, []tracecore.SpanID{spanCtx(1).SpanID()}))
+	assert.Equal(t, spans, selectSlowestSpans(spans, -1, []tracecore.SpanID{spanCtx(1).SpanID()}))
 }
 
 func TestSelectSlowestSpans_KeepsRootAndSlowestChildren(t *testing.T) {
@@ -65,7 +65,7 @@ func TestSelectSlowestSpans_KeepsRootAndSlowestChildren(t *testing.T) {
 
 	spans := []sdktrace.ReadOnlySpan{root, fastChild, slowChild, mediumChild}
 
-	out := selectSlowestSpans(spans, 3, spanCtx(1).SpanID())
+	out := selectSlowestSpans(spans, 3, []tracecore.SpanID{spanCtx(1).SpanID()})
 
 	require.Len(t, out, 3)
 	names := spanIDSet(out)
@@ -82,7 +82,7 @@ func TestSelectSlowestSpans_ReparentsToNearestKeptAncestor(t *testing.T) {
 	grandchild := newFakeSpanWithParent(3, spanCtx(2), base, base.Add(60*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{root, droppedMid, grandchild}
 
-	out := selectSlowestSpans(spans, 2, spanCtx(1).SpanID())
+	out := selectSlowestSpans(spans, 2, []tracecore.SpanID{spanCtx(1).SpanID()})
 
 	require.Len(t, out, 2)
 	var kept sdktrace.ReadOnlySpan
@@ -103,7 +103,7 @@ func TestSelectSlowestSpans_ReparentsToNearestKeptAncestorTwoLevelsUp(t *testing
 	c := newFakeSpanWithParent(4, spanCtx(3), base, base.Add(80*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{root, a, b, c}
 
-	out := selectSlowestSpans(spans, 2, spanCtx(1).SpanID())
+	out := selectSlowestSpans(spans, 2, []tracecore.SpanID{spanCtx(1).SpanID()})
 
 	require.Len(t, out, 2)
 	ids := spanIDSet(out)
@@ -127,7 +127,7 @@ func TestSelectSlowestSpans_DroppedSpanWithNoKeptAncestorBecomesRootless(t *test
 	otherSlow := newFakeSpanWithParent(3, tracecore.SpanContext{}, base, base.Add(60*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{fastParent, slowChild, otherSlow}
 
-	out := selectSlowestSpans(spans, 2, tracecore.SpanID{})
+	out := selectSlowestSpans(spans, 2, []tracecore.SpanID{tracecore.SpanID{}})
 
 	require.Len(t, out, 2)
 	var child sdktrace.ReadOnlySpan
@@ -147,7 +147,7 @@ func TestSelectSlowestSpans_PreservesOriginalOrder(t *testing.T) {
 	c2 := newFakeSpanWithParent(3, spanCtx(1), base, base.Add(20*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{root, c1, c2}
 
-	out := selectSlowestSpans(spans, 3, spanCtx(1).SpanID())
+	out := selectSlowestSpans(spans, 3, []tracecore.SpanID{spanCtx(1).SpanID()})
 
 	require.Len(t, out, 3)
 	assert.Equal(t, tracecore.SpanID{1}, out[0].SpanContext().SpanID())
@@ -162,7 +162,7 @@ func TestSelectSlowestSpans_ProtectsAllTransactionRoots(t *testing.T) {
 	slow := newFakeSpanWithParent(3, spanCtx(1), base, base.Add(100*time.Millisecond))
 	spans := []sdktrace.ReadOnlySpan{rootA, rootB, slow}
 
-	out := selectSlowestSpans(spans, 2, spanCtx(1).SpanID(), spanCtx(2).SpanID())
+	out := selectSlowestSpans(spans, 2, []tracecore.SpanID{spanCtx(1).SpanID(), spanCtx(2).SpanID()})
 
 	ids := spanIDSet(out)
 	assert.Contains(t, ids, tracecore.SpanID{1})

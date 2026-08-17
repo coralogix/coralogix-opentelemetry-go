@@ -37,7 +37,7 @@ func TestForceFlush_DoesNotFinalizeIncompleteTraces(t *testing.T) {
 	require.Len(t, spans, 2)
 
 	parent := findSpan(t, spans, "parent")
-	assertFloat64Attribute(t, parent.Attributes, SelfTimeAttribute, 0.04)
+	assertFloat64Attribute(t, parent.Attributes, SelfDurationAttribute, 0.04)
 
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
@@ -102,7 +102,7 @@ func TestShutdown_WaitsForInFlightSpansBeforeExporterShutdown(t *testing.T) {
 	spans := exporter.get()
 	require.Len(t, spans, 2, "Shutdown must wait for in-flight spans and export before shutting the exporter")
 	parent := findSpan(t, spans, "parent")
-	assertFloat64Attribute(t, parent.Attributes, SelfTimeAttribute, 0.04)
+	assertFloat64Attribute(t, parent.Attributes, SelfDurationAttribute, 0.04)
 
 	_ = tp.Shutdown(context.Background())
 }
@@ -194,7 +194,7 @@ func TestShutdown_PostStopChildPreventsPrematureParentFinalize(t *testing.T) {
 	spans := exporter.get()
 	require.Len(t, spans, 2)
 	parent := findSpan(t, spans, "parent")
-	assertFloat64Attribute(t, parent.Attributes, SelfTimeAttribute, 0.02)
+	assertFloat64Attribute(t, parent.Attributes, SelfDurationAttribute, 0.02)
 
 	_ = tp.Shutdown(context.Background())
 }
