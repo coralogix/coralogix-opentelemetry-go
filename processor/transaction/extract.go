@@ -142,3 +142,69 @@ func (p *TransactionSpanProcessor) extractCompletedLocalTransactionsLocked(tb *t
 
 	return batches
 }
+
+// hasExtractableNestedTransaction reports whether a nested transaction root
+// subtree is fully ended while an outer ancestor is still live.
+func hasExtractableNestedTransaction(tb *traceBuffer) bool {
+	if len(tb.spans) == 0 || tb.liveCount() == 0 {
+		return false
+	}
+
+	parentOf := make(map[tracecore.SpanID]tracecore.SpanID, len(tb.spans)+len(tb.liveParents))
+	for _, s := range tb.spans {
+		if pid := s.Parent().SpanID(); pid.IsValid() {
+			parentOf[s.SpanContext().SpanID()] = pid
+		}
+	}
+	for id, pid := range tb.liveParents {
+		if pid.IsValid() {
+			parentOf[id] = pid
+		}
+	}
+
+	underRoot := func(spanID, rootID tracecore.SpanID) bool {
+		cur := spanID
+		seen := make(map[tracecore.SpanID]struct{})
+		for cur.IsValid() {
+			if _, done := seen[cur]; done {
+				break
+			}
+			if cur == rootID {
+				return true
+			}
+			seen[cur] = struct{}{}
+			next, ok := parentOf[cur]
+			if !ok {
+				break
+			}
+			cur = next
+		}
+		return false
+	}
+
+	hasLiveInSubtree := func(rootID tracecore.SpanID) bool {
+		if _, ok := tb.liveParents[rootID]; ok {
+			return true
+		}
+		for liveID := range tb.liveParents {
+			if underRoot(liveID, rootID) {
+				return true
+			}
+		}
+		return false
+	}
+
+	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
+	for _, s := range tb.spans {
+		for _, a := range s.Attributes() {
+			if a.Key == rootKey && a.Value.AsBool() {
+				rootID := s.SpanContext().SpanID()
+				if !hasLiveInSubtree(rootID) {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
+}

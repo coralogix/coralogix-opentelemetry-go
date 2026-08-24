@@ -34,14 +34,20 @@ const (
 	SelfDurationMetricUnit  = unit.Unit("s")
 	SpanNameMetricAttribute = "span.name"
 
-	instrumentationName = "github.com/coralogix/coralogix-opentelemetry-go/processor/transaction"
+	instrumentationName = "coralogix.opentelemetry.transaction"
 )
 
+type spanMembership struct {
+	// inheritedName is set when the parent transaction name comes only from
+	// TraceState / attrs without a locally tracked root (finalize fallback).
+	inheritedName string
+}
+
 type traceBuffer struct {
-	spans         []sdktrace.ReadOnlySpan
-	liveParents   map[tracecore.SpanID]tracecore.SpanID
-	tracked       map[tracecore.SpanID]struct{} // local-txn membership for OnStart inherit detection
-	completeTimer *time.Timer
+	spans               []sdktrace.ReadOnlySpan
+	liveParents         map[tracecore.SpanID]tracecore.SpanID
+	completeTimer       *time.Timer
+	nestedCompleteTimer *time.Timer
 }
 
 func (tb *traceBuffer) liveCount() int {
@@ -55,6 +61,7 @@ type TransactionSpanProcessor struct {
 
 	mu             sync.Mutex
 	traces         map[tracecore.TraceID]*traceBuffer
+	membership     map[tracecore.SpanID]spanMembership
 	childIntervals map[tracecore.SpanID][]interval
 
 	selfDurationHistogram syncfloat64.Histogram
@@ -150,6 +157,7 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 	p := &TransactionSpanProcessor{
 		exporter:           exporter,
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
+		membership:         make(map[tracecore.SpanID]spanMembership),
 		childIntervals:     make(map[tracecore.SpanID][]interval),
 		maxNodes:           maxNodes,
 		maxRegularTraces:   maxRegularTraces,
@@ -204,12 +212,11 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var tracked map[tracecore.SpanID]struct{}
-	tb, ok := p.traces[traceID]
 	if p.exporterShutdown.Load() {
 		beginTransaction(ctx, s, nil)
 		return
 	}
+	tb, ok := p.traces[traceID]
 	if !ok {
 		if p.stopped {
 			beginTransaction(ctx, s, nil)
@@ -217,22 +224,18 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 		}
 		tb = &traceBuffer{
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			tracked:     make(map[tracecore.SpanID]struct{}),
 		}
 		p.traces[traceID] = tb
-	}
-	if tb.tracked == nil {
-		tb.tracked = make(map[tracecore.SpanID]struct{})
 	}
 	if tb.liveParents == nil {
 		tb.liveParents = make(map[tracecore.SpanID]tracecore.SpanID)
 	}
-	tracked = tb.tracked
-	beginTransaction(ctx, s, tracked)
+	beginTransaction(ctx, s, p.membership)
 
 	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
 	if p.stopped {
 		p.stopCompleteTimerLocked(tb)
+		p.stopNestedCompleteTimerLocked(tb)
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
 		return
 	}
@@ -257,14 +260,15 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		}
 		tb = &traceBuffer{
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			tracked:     make(map[tracecore.SpanID]struct{}),
 		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
-		tb.tracked[s.SpanContext().SpanID()] = struct{}{}
+		p.membership[s.SpanContext().SpanID()] = spanMembership{}
 	}
 
-	if parent := s.Parent(); parent.IsValid() {
+	// Only retain intervals for parents we track locally. Remote / external
+	// parent IDs are never cleaned by acceptCompleted and would leak.
+	if parent := s.Parent(); parent.IsValid() && isLocalParent(parent.SpanID(), tb) {
 		p.childIntervals[parent.SpanID()] = append(p.childIntervals[parent.SpanID()], interval{
 			start: s.StartTime().UnixNano(),
 			end:   s.EndTime().UnixNano(),
@@ -276,8 +280,11 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	var batches [][]sdktrace.ReadOnlySpan
 	if tb.liveCount() > 0 {
-		batches = p.extractCompletedLocalTransactionsLocked(tb, false)
+		// Nested local txn finished while an outer ancestor is still live:
+		// apply the same completion holdback so late children can join.
+		batches = p.scheduleNestedCompletionLocked(traceID, tb)
 	} else {
+		p.stopNestedCompleteTimerLocked(tb)
 		batches = p.scheduleCompletionLocked(traceID, tb)
 	}
 
@@ -294,6 +301,18 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		p.idle.Broadcast()
 		p.mu.Unlock()
 	}
+}
+
+func isLocalParent(parentID tracecore.SpanID, tb *traceBuffer) bool {
+	if _, ok := tb.liveParents[parentID]; ok {
+		return true
+	}
+	for _, sp := range tb.spans {
+		if sp.SpanContext().SpanID() == parentID {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *TransactionSpanProcessor) totalLiveLocked() int {
@@ -336,6 +355,7 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		var leftover [][]sdktrace.ReadOnlySpan
 		for id, tb := range p.traces {
 			p.stopCompleteTimerLocked(tb)
+			p.stopNestedCompleteTimerLocked(tb)
 			if tb.liveCount() > 0 {
 				delete(p.traces, id)
 				continue

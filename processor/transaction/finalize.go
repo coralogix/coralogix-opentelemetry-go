@@ -21,7 +21,8 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 	}
 	defer p.popChildIntervals(spans)
 
-	named := stampTransactionAttributes(spans)
+	tracked := p.snapshotMembership(spans)
+	named := stampTransactionAttributes(spans, tracked)
 	stamped := p.stampSelfDurationAndMetrics(named)
 
 	trimmed := selectSlowestSpans(stamped, p.maxNodes, findTransactionRootSpanIDs(stamped))
@@ -99,14 +100,28 @@ func filterPriorIntervals(prior []interval, children []sdktrace.ReadOnlySpan) []
 	return out
 }
 
+func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlySpan) map[tracecore.SpanID]spanMembership {
+	if len(spans) == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[tracecore.SpanID]spanMembership, len(spans))
+	for _, s := range spans {
+		sid := s.SpanContext().SpanID()
+		if m, ok := p.membership[sid]; ok {
+			out[sid] = m
+		}
+	}
+	return out
+}
+
 func (p *TransactionSpanProcessor) popChildIntervals(spans []sdktrace.ReadOnlySpan) {
 	p.mu.Lock()
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
 		delete(p.childIntervals, sid)
-		if tb, ok := p.traces[s.SpanContext().TraceID()]; ok && tb.tracked != nil {
-			delete(tb.tracked, sid)
-		}
+		delete(p.membership, sid)
 	}
 	p.mu.Unlock()
 }
@@ -129,6 +144,13 @@ func (p *TransactionSpanProcessor) stopCompleteTimerLocked(tb *traceBuffer) {
 	if tb.completeTimer != nil {
 		tb.completeTimer.Stop()
 		tb.completeTimer = nil
+	}
+}
+
+func (p *TransactionSpanProcessor) stopNestedCompleteTimerLocked(tb *traceBuffer) {
+	if tb.nestedCompleteTimer != nil {
+		tb.nestedCompleteTimer.Stop()
+		tb.nestedCompleteTimer = nil
 	}
 }
 
@@ -174,14 +196,69 @@ func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.Tr
 	return nil
 }
 
+// scheduleNestedCompletionLocked delays nested extract while an outer ancestor
+// is still live so late fire-and-forget children under the nested root can join.
+func (p *TransactionSpanProcessor) scheduleNestedCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {
+	if !hasExtractableNestedTransaction(tb) {
+		p.stopNestedCompleteTimerLocked(tb)
+		return nil
+	}
+	if tb.nestedCompleteTimer != nil {
+		// Already armed; do not reset on unrelated outer activity.
+		return nil
+	}
+	if p.completionHoldback <= 0 {
+		return p.extractCompletedLocalTransactionsLocked(tb, false)
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(p.completionHoldback, func() {
+		p.mu.Lock()
+		if p.exporterShutdown.Load() {
+			p.mu.Unlock()
+			return
+		}
+		cur, ok := p.traces[traceID]
+		if !ok || cur.nestedCompleteTimer != timer {
+			p.mu.Unlock()
+			return
+		}
+		cur.nestedCompleteTimer = nil
+		var batches [][]sdktrace.ReadOnlySpan
+		if cur.liveCount() > 0 {
+			batches = p.extractCompletedLocalTransactionsLocked(cur, false)
+		}
+		p.pendingFinalize += len(batches)
+		p.mu.Unlock()
+
+		for _, batch := range batches {
+			p.acceptCompleted(batch)
+			p.mu.Lock()
+			p.pendingFinalize--
+			p.idle.Broadcast()
+			p.mu.Unlock()
+		}
+
+		// Re-arm if another nested root became extractable after the fire.
+		p.mu.Lock()
+		if cur, ok := p.traces[traceID]; ok && cur.liveCount() > 0 {
+			_ = p.scheduleNestedCompletionLocked(traceID, cur)
+		}
+		p.mu.Unlock()
+	})
+	tb.nestedCompleteTimer = timer
+	return nil
+}
+
 func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
 	for {
 		var batches [][]sdktrace.ReadOnlySpan
 		for id, tb := range p.traces {
+			p.stopCompleteTimerLocked(tb)
+			p.stopNestedCompleteTimerLocked(tb)
 			if tb.liveCount() > 0 {
+				batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, false)...)
 				continue
 			}
-			p.stopCompleteTimerLocked(tb)
 			batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, true)...)
 			if len(tb.spans) == 0 {
 				delete(p.traces, id)

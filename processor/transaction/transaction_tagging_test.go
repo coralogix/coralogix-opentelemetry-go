@@ -167,6 +167,32 @@ func TestTagTransaction_UsesFinalSpanNameAfterUpdateName(t *testing.T) {
 	assertNoAttribute(t, childStub.Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t *testing.T) {
+	exporter, tracer, shutdown := newTracerProvider(t)
+	defer shutdown()
+
+	traceState := tracecore.TraceState{}
+	traceState, err := traceState.Insert(sampler.TransactionIdentifierTraceState, "from-tracestate")
+	require.NoError(t, err)
+
+	parentCtx := tracecore.NewSpanContext(tracecore.SpanContextConfig{
+		TraceID:    tracecore.TraceID{0x01},
+		SpanID:     tracecore.SpanID{0x01},
+		TraceFlags: tracecore.FlagsSampled,
+		TraceState: traceState,
+		Remote:     false,
+	})
+	ctx := tracecore.ContextWithSpanContext(context.Background(), parentCtx)
+
+	_, child := tracer.Start(ctx, "internal-child", tracecore.WithSpanKind(tracecore.SpanKindInternal))
+	child.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "from-tracestate")
+	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func findSpan(t *testing.T, spans []sdktracetest.SpanStub, name string) *sdktracetest.SpanStub {
 	t.Helper()
 	for i := range spans {

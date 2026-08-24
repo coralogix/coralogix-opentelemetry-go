@@ -19,7 +19,7 @@ import (
 //
 // Pre-set cgx.transaction (sampler template / StartNewTransaction) is left on
 // the span and treated as an override at finalize.
-func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]struct{}) {
+func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership) {
 	parent := s.Parent()
 	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked)
 
@@ -28,8 +28,16 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 		s.SpanKind() == tracecore.SpanKindServer ||
 		s.SpanKind() == tracecore.SpanKindConsumer
 
+	inheritedName := ""
+	if !starts {
+		name, hasName, hasLocalRoot := resolveParentInfo(ctx, parent, tracked)
+		if hasName && name != "" && !hasLocalRoot {
+			inheritedName = name
+		}
+	}
+
 	if tracked != nil {
-		tracked[s.SpanContext().SpanID()] = struct{}{}
+		tracked[s.SpanContext().SpanID()] = spanMembership{inheritedName: inheritedName}
 	}
 
 	if !starts {
@@ -43,52 +51,107 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 // hasLocalTransaction reports whether the parent is already part of a local
 // transaction tree. Prefers the OnStart side table (attrs are not stamped on
 // inherit children until finalize), then live parent attrs / tracestate.
-func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]struct{}) bool {
+func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership) bool {
 	if parent.IsValid() && tracked != nil {
 		if _, ok := tracked[parent.SpanID()]; ok {
 			return true
 		}
 	}
-	_, has := parentTransactionName(ctx, parent)
+	_, has, _ := resolveParentInfo(ctx, parent, tracked)
 	return has
 }
 
-func parentTransactionName(ctx context.Context, parent tracecore.SpanContext) (txnName string, hasLocalTxn bool) {
+// resolveParentInfo returns (name, hasTransaction, hasLocalRoot).
+// hasLocalRoot is true when the parent is in the local membership side-table
+// (or carries an explicit root attr on a live span).
+func resolveParentInfo(
+	ctx context.Context,
+	parent tracecore.SpanContext,
+	tracked map[tracecore.SpanID]spanMembership,
+) (name string, hasTxn bool, hasLocalRoot bool) {
+	if parent.IsValid() && tracked != nil {
+		if m, ok := tracked[parent.SpanID()]; ok {
+			return m.inheritedName, true, true
+		}
+	}
+
 	if parentSpan := tracecore.SpanFromContext(ctx); parentSpan != nil {
 		if rw, ok := parentSpan.(sdktrace.ReadWriteSpan); ok {
+			var txnName string
+			var isRoot bool
 			for _, a := range rw.Attributes() {
-				if a.Key == attribute.Key(sampler.TransactionIdentifier) {
+				switch a.Key {
+				case attribute.Key(sampler.TransactionIdentifier):
 					txnName = a.Value.AsString()
-					break
+				case attribute.Key(sampler.TransactionIdentifierRoot):
+					isRoot = a.Value.AsBool()
 				}
+			}
+			if isRoot {
+				return txnName, true, true
 			}
 			if txnName != "" {
-				return txnName, true
-			}
-			for _, a := range rw.Attributes() {
-				if a.Key == attribute.Key(sampler.TransactionIdentifierRoot) && a.Value.AsBool() {
-					return "", true
+				sc := rw.SpanContext()
+				local := tracked != nil && sc.IsValid()
+				if local {
+					_, local = tracked[sc.SpanID()]
 				}
+				return txnName, true, local
+			}
+		}
+		// Non-recording parent from ContextWithSpanContext: read TraceState here.
+		sc := parentSpan.SpanContext()
+		if sc.IsValid() {
+			if tsName := sc.TraceState().Get(sampler.TransactionIdentifierTraceState); tsName != "" {
+				return tsName, true, false
 			}
 		}
 	}
 
-	txnName = parent.TraceState().Get(sampler.TransactionIdentifierTraceState)
-	return txnName, txnName != ""
+	if parent.IsValid() {
+		tsName := parent.TraceState().Get(sampler.TransactionIdentifierTraceState)
+		if tsName != "" {
+			return tsName, true, false
+		}
+	}
+	return "", false, false
 }
 
 // stampTransactionAttributes sets cgx.transaction on every span in a completed
 // local batch from the root's final Name() (or a pre-set override attribute).
-func stampTransactionAttributes(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
+func stampTransactionAttributes(
+	spans []sdktrace.ReadOnlySpan,
+	tracked map[tracecore.SpanID]spanMembership,
+) []sdktrace.ReadOnlySpan {
 	if len(spans) == 0 {
 		return spans
 	}
 
 	root := findTransactionRootSpan(spans)
-	if root == nil {
-		root = spans[0]
+	var name string
+	if root != nil {
+		name = resolveTransactionName(root)
+	} else {
+		// Leftover flush without ROOT markers: prefer TraceState-inherited name.
+		for _, s := range spans {
+			if tracked != nil {
+				if m, ok := tracked[s.SpanContext().SpanID()]; ok && m.inheritedName != "" {
+					name = m.inheritedName
+					break
+				}
+			}
+		}
+		if name == "" {
+			fallback := spans[0]
+			for _, s := range spans {
+				if !s.Parent().IsValid() {
+					fallback = s
+					break
+				}
+			}
+			name = resolveTransactionName(fallback)
+		}
 	}
-	name := resolveTransactionName(root)
 
 	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
 	for _, s := range spans {
