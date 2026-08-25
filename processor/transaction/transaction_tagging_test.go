@@ -419,6 +419,129 @@ func TestTagTransaction_LateGrandchildKeepsInheritedName(t *testing.T) {
 	assertNoAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_LateGrandchildWaitsForLiveParent(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-grandchild-wait")
+
+	outerCtx, outer := tracer.Start(context.Background(), "outer",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	rootCtx, root := tracer.Start(outerCtx, "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /orders")
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 1)
+	exporter.Reset()
+
+	lateCtx, late := tracer.Start(rootCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, grandchild := tracer.Start(lateCtx, "late-grandchild",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	grandchild.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	assert.Empty(t, exporter.GetSpans(), "grandchild must wait for still-live late parent")
+
+	late.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	assertAttribute(t, findSpan(t, spans, "late-child").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifier, "GET /orders")
+
+	outer.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+}
+
+func TestTagTransaction_SamplerRootClearedOnInherit(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(processor),
+		sdktrace.WithSampler(sampler.NewCoralogixSampler(sdktrace.AlwaysSample())),
+	)
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("sampler-root-clear")
+
+	rootCtx, root := tracer.Start(context.Background(), "parent-txn",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	// Child name equals inherited transaction name — sampler would mark root=true.
+	_, child := tracer.Start(rootCtx, "parent-txn",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	child.End()
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	var rootCount int
+	for _, s := range spans {
+		for _, a := range s.Attributes {
+			if string(a.Key) == sampler.TransactionIdentifierRoot && a.Value.AsBool() {
+				rootCount++
+			}
+		}
+	}
+	assert.Equal(t, 1, rootCount, "inherited child must not remain a transaction root")
+}
+
+func TestTagTransaction_SameNameFinalizedRootsPartitionSeparately(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+		WithMaxNodes(1),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("same-name-partition")
+
+	outerCtx, outer := tracer.Start(context.Background(), "gateway",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	aCtx, a := tracer.Start(outerCtx, "POST /webhook",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	bCtx, b := tracer.Start(outerCtx, "POST /webhook",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	b.End()
+	outer.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 3)
+	exporter.Reset()
+
+	_, lateA := tracer.Start(aCtx, "late-a",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, lateB := tracer.Start(bCtx, "late-b",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	lateA.End()
+	lateB.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2, "same display name must not merge distinct finalized roots")
+	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "POST /webhook")
+	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "POST /webhook")
+}
+
 func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,

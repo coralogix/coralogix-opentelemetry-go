@@ -194,32 +194,36 @@ func (p *TransactionSpanProcessor) extractRootlessFinalizedGroupsLocked(tb *trac
 		if isTransactionRoot(s) {
 			continue
 		}
-		name := ""
-		if m, ok := p.membership[s.SpanContext().SpanID()]; ok {
-			name = m.inheritedName
-		}
-		if name == "" {
+		m, ok := p.membership[s.SpanContext().SpanID()]
+		if !ok || m.inheritedName == "" {
 			continue
 		}
-		if _, seen := groups[name]; !seen {
-			order = append(order, name)
+		key := membershipPartitionKey(m)
+		if key == "" {
+			continue
 		}
-		groups[name] = append(groups[name], s)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], s)
 	}
 
 	var batches [][]sdktrace.ReadOnlySpan
 	extracted := make(map[tracecore.SpanID]struct{})
-	for _, name := range order {
-		group := groups[name]
+	for _, key := range order {
+		group := groups[key]
 		liveRelated := false
-		for _, s := range group {
-			sid := s.SpanContext().SpanID()
-			if _, ok := tb.liveParents[sid]; ok {
+		// Hold while any live span belongs to the same inherited transaction
+		// (descendant, sibling, or still-live parent), ignoring unrelated outer.
+		for liveID := range tb.liveParents {
+			if m, ok := p.membership[liveID]; ok && membershipPartitionKey(m) == key {
 				liveRelated = true
 				break
 			}
-			for liveID := range tb.liveParents {
-				if underRoot(liveID, sid) {
+			// Also hold for live descendants under an ended group member even
+			// if that live span has not yet recorded the same partition key.
+			for _, s := range group {
+				if underRoot(liveID, s.SpanContext().SpanID()) {
 					liveRelated = true
 					break
 				}
@@ -250,7 +254,7 @@ func (p *TransactionSpanProcessor) extractRootlessFinalizedGroupsLocked(tb *trac
 }
 
 // partitionByInheritedName splits spans into batches keyed by membership
-// inheritedName (empty name is one group). Preserves first-seen order.
+// partition identity (inheritedFrom, else inheritedName). Preserves first-seen order.
 func partitionByInheritedName(
 	spans []sdktrace.ReadOnlySpan,
 	tracked map[tracecore.SpanID]spanMembership,
@@ -261,16 +265,16 @@ func partitionByInheritedName(
 	groups := make(map[string][]sdktrace.ReadOnlySpan)
 	var order []string
 	for _, s := range spans {
-		name := ""
+		key := ""
 		if tracked != nil {
 			if m, ok := tracked[s.SpanContext().SpanID()]; ok {
-				name = m.inheritedName
+				key = membershipPartitionKey(m)
 			}
 		}
-		if _, seen := groups[name]; !seen {
-			order = append(order, name)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
 		}
-		groups[name] = append(groups[name], s)
+		groups[key] = append(groups[key], s)
 	}
 	out := make([][]sdktrace.ReadOnlySpan, 0, len(order))
 	for _, key := range order {
@@ -334,18 +338,26 @@ func (p *TransactionSpanProcessor) hasExtractableRootlessFinalized(tb *traceBuff
 		if !ok || m.inheritedName == "" {
 			continue
 		}
+		key := membershipPartitionKey(m)
+		if key == "" {
+			continue
+		}
 		sid := s.SpanContext().SpanID()
 		if _, live := tb.liveParents[sid]; live {
 			continue
 		}
-		liveDescendant := false
+		liveRelated := false
 		for liveID := range tb.liveParents {
+			if lm, ok := p.membership[liveID]; ok && membershipPartitionKey(lm) == key {
+				liveRelated = true
+				break
+			}
 			if underRoot(liveID, sid) {
-				liveDescendant = true
+				liveRelated = true
 				break
 			}
 		}
-		if !liveDescendant {
+		if !liveRelated {
 			return true
 		}
 	}

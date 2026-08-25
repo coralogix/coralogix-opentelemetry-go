@@ -42,6 +42,10 @@ type spanMembership struct {
 	// TraceState / attrs without a locally tracked root (finalize fallback),
 	// or when inheriting from a finalized parent name in the side cache.
 	inheritedName string
+	// inheritedFrom is the SpanID of the finalized (or TraceState) source that
+	// supplied inheritedName. Used as the rootless partition key so two local
+	// transactions that share a display name stay separate.
+	inheritedFrom tracecore.SpanID
 	// startName is the span name observed at OnStart (before UpdateName).
 	startName string
 	// overrideName is an explicit transaction name that must win over the

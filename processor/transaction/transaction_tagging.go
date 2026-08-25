@@ -31,14 +31,19 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 		s.SpanKind() == tracecore.SpanKindConsumer
 
 	inheritedName := ""
+	var inheritedFrom tracecore.SpanID
 	if !starts {
-		name, hasName, _ := resolveParentInfo(ctx, parent, tracked, finalized)
+		name, hasName, _, from := resolveParentInfo(ctx, parent, tracked, finalized)
 		// Keep a nonempty parent name even when the parent is still tracked.
 		// Late children that inherited from finalizedNames / TraceState must
 		// pass that name to their own children; otherwise rootless leftover
 		// partitioning stamps the grandchild as a separate transaction.
 		if hasName && name != "" {
 			inheritedName = name
+			inheritedFrom = from
+			if !inheritedFrom.IsValid() && parent.IsValid() {
+				inheritedFrom = parent.SpanID()
+			}
 		}
 	}
 
@@ -53,12 +58,17 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 	if tracked != nil {
 		tracked[s.SpanContext().SpanID()] = spanMembership{
 			inheritedName: inheritedName,
+			inheritedFrom: inheritedFrom,
 			startName:     startName,
 			overrideName:  overrideName,
 		}
 	}
 
 	if !starts {
+		// Sampler may have set cgx.transaction.root=true when the child name
+		// equals the inherited transaction name; clear so extract does not
+		// treat this ordinary inherit child as a nested root.
+		s.SetAttributes(attribute.Bool(sampler.TransactionIdentifierRoot, false))
 		return
 	}
 
@@ -81,30 +91,35 @@ func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, trac
 			return true
 		}
 	}
-	_, has, _ := resolveParentInfo(ctx, parent, tracked, finalized)
+	_, has, _, _ := resolveParentInfo(ctx, parent, tracked, finalized)
 	return has
 }
 
-// resolveParentInfo returns (name, hasTransaction, hasLocalRoot).
+// resolveParentInfo returns (name, hasTransaction, hasLocalRoot, inheritedFrom).
 // hasLocalRoot is true when the parent is in the local membership side-table
-// (or carries an explicit root attr on a live span).
+// (or carries an explicit root attr on a live span). inheritedFrom is the
+// SpanID that identifies the source transaction for rootless partitioning.
 func resolveParentInfo(
 	ctx context.Context,
 	parent tracecore.SpanContext,
 	tracked map[tracecore.SpanID]spanMembership,
 	finalized map[tracecore.SpanID]string,
-) (name string, hasTxn bool, hasLocalRoot bool) {
+) (name string, hasTxn bool, hasLocalRoot bool, inheritedFrom tracecore.SpanID) {
 	if parent.IsValid() && tracked != nil {
 		if m, ok := tracked[parent.SpanID()]; ok {
-			if m.finalized {
-				return m.inheritedName, true, false
+			from := m.inheritedFrom
+			if !from.IsValid() {
+				from = parent.SpanID()
 			}
-			return m.inheritedName, true, true
+			if m.finalized {
+				return m.inheritedName, true, false, from
+			}
+			return m.inheritedName, true, true, from
 		}
 	}
 	if parent.IsValid() && finalized != nil {
 		if n, ok := finalized[parent.SpanID()]; ok {
-			return n, true, false
+			return n, true, false, parent.SpanID()
 		}
 	}
 
@@ -130,7 +145,11 @@ func resolveParentInfo(
 				if local {
 					_, local = tracked[sc.SpanID()]
 				}
-				return txnName, true, local
+				from := tracecore.SpanID{}
+				if sc.IsValid() {
+					from = sc.SpanID()
+				}
+				return txnName, true, local, from
 			}
 			if txnName != "" {
 				sc := rw.SpanContext()
@@ -138,14 +157,18 @@ func resolveParentInfo(
 				if local {
 					_, local = tracked[sc.SpanID()]
 				}
-				return txnName, true, local
+				from := tracecore.SpanID{}
+				if sc.IsValid() {
+					from = sc.SpanID()
+				}
+				return txnName, true, local, from
 			}
 		}
 		// Non-recording parent from ContextWithSpanContext: read TraceState here.
 		sc := parentSpan.SpanContext()
 		if sc.IsValid() {
 			if tsName := sc.TraceState().Get(sampler.TransactionIdentifierTraceState); tsName != "" {
-				return tsName, true, false
+				return tsName, true, false, sc.SpanID()
 			}
 		}
 	}
@@ -153,10 +176,22 @@ func resolveParentInfo(
 	if parent.IsValid() {
 		tsName := parent.TraceState().Get(sampler.TransactionIdentifierTraceState)
 		if tsName != "" {
-			return tsName, true, false
+			return tsName, true, false, parent.SpanID()
 		}
 	}
-	return "", false, false
+	return "", false, false, tracecore.SpanID{}
+}
+
+// membershipPartitionKey identifies the local transaction a rootless span
+// belongs to. Prefer inheritedFrom so same-named transactions stay separate.
+func membershipPartitionKey(m spanMembership) string {
+	if m.inheritedFrom.IsValid() {
+		return "id:" + m.inheritedFrom.String()
+	}
+	if m.inheritedName != "" {
+		return "name:" + m.inheritedName
+	}
+	return ""
 }
 
 // stampTransactionAttributes sets cgx.transaction on every span in a completed
@@ -180,27 +215,30 @@ func stampTransactionAttributes(
 	}
 
 	// Leftover flush without ROOT markers: partition by inherited transaction
-	// so late children from different finalized txns on the same TraceID are
-	// not stamped with a single shared name.
+	// identity (not display name) so same-named local traces stay separate.
 	partitions := make(map[string][]sdktrace.ReadOnlySpan)
+	partName := make(map[string]string)
 	var order []string
 	for _, s := range spans {
+		key := ""
 		name := ""
 		if tracked != nil {
 			if m, ok := tracked[s.SpanContext().SpanID()]; ok {
+				key = membershipPartitionKey(m)
 				name = m.inheritedName
 			}
 		}
-		if _, seen := partitions[name]; !seen {
-			order = append(order, name)
+		if _, seen := partitions[key]; !seen {
+			order = append(order, key)
+			partName[key] = name
 		}
-		partitions[name] = append(partitions[name], s)
+		partitions[key] = append(partitions[key], s)
 	}
 
 	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
 	for _, key := range order {
 		part := partitions[key]
-		name := key
+		name := partName[key]
 		if name == "" {
 			fallback := part[0]
 			for _, s := range part {

@@ -380,7 +380,7 @@ func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
 			stubs := p.harvest.restore(winners[i:])
 			p.harvestMu.Unlock()
 			if len(stubs) > 0 && p.exporter != nil {
-				if stubErr := p.exporter.ExportSpans(context.Background(), stubs); stubErr != nil {
+				if stubErr := p.exporter.ExportSpans(ctx, stubs); stubErr != nil {
 					otel.Handle(stubErr)
 				}
 			}
