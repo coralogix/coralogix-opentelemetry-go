@@ -259,6 +259,40 @@ func TestTagTransaction_LateChildInheritsFinalizedParentName(t *testing.T) {
 	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_LateChildInheritsProcessorOnlyFinalizedName(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-child-processor-only")
+
+	// Processor-only root: no StartNewTransaction / sampler attr. Final name
+	// exists only on the export wrapper unless we retain a membership tombstone.
+	rootCtx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /myroute")
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 1)
+	assertAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier, "GET /myroute")
+	exporter.Reset()
+
+	_, child := tracer.Start(rootCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	child.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "GET /myroute")
+	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t *testing.T) {
 	exporter, tracer, shutdown := newTracerProvider(t)
 	defer shutdown()

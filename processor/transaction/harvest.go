@@ -65,6 +65,14 @@ func (r *regularTraceHeap) drain() []harvestTrace {
 	return traces
 }
 
+// restore puts drained traces back without applying harvest capacity eviction.
+// Used when a flush export fails so ForceFlush callers can retry.
+func (r *regularTraceHeap) restore(traces []harvestTrace) {
+	for _, t := range traces {
+		heap.Push(&r.heap, t)
+	}
+}
+
 // harvestStubSpans returns the local-transaction root span(s) for APM presence when
 // a completed tree loses harvest (full waterfall is dropped).
 func harvestStubSpans(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {

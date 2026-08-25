@@ -2,6 +2,8 @@ package transaction
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,3 +131,56 @@ func TestProcessor_TrimAppliesBeforeHarvest(t *testing.T) {
 
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
+
+func TestForceFlush_PropagatesHarvestExportErrorAndRestores(t *testing.T) {
+	exportErr := errors.New("harvest export failed")
+	exporter := &failingHarvestExporter{err: exportErr}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(1),
+		WithHarvestPeriod(time.Hour),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("harvest-flush-err")
+	base := time.Unix(0, 0)
+
+	_, root := tracer.Start(context.Background(), "held",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+		tracecore.WithTimestamp(base),
+	)
+	root.End(tracecore.WithTimestamp(base.Add(50 * time.Millisecond)))
+	assert.Empty(t, exporter.spans, "trace must sit in harvest until ForceFlush")
+
+	err := processor.ForceFlush(context.Background())
+	require.ErrorIs(t, err, exportErr)
+	assert.Equal(t, 1, exporter.calls)
+
+	// Failed flush must restore the drained winner so a later flush can retry.
+	exporter.err = nil
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	assert.Equal(t, 2, exporter.calls)
+	require.Len(t, exporter.spans, 1)
+	assert.Equal(t, "held", exporter.spans[0].Name)
+
+	_ = tp.Shutdown(context.Background())
+}
+
+type failingHarvestExporter struct {
+	mu    sync.Mutex
+	err   error
+	calls int
+	spans sdktracetest.SpanStubs
+}
+
+func (e *failingHarvestExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	if e.err != nil {
+		return e.err
+	}
+	e.spans = append(e.spans, sdktracetest.SpanStubsFromReadOnlySpans(spans)...)
+	return nil
+}
+
+func (e *failingHarvestExporter) Shutdown(context.Context) error { return nil }

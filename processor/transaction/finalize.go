@@ -19,10 +19,14 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 	if len(spans) == 0 {
 		return
 	}
-	defer p.popChildIntervals(spans)
 
 	tracked := p.snapshotMembership(spans)
 	named := stampTransactionAttributes(spans, tracked)
+	// Retain finalized root names before clearing active membership so late
+	// children can inherit (processor-only roots never wrote cgx.transaction
+	// onto the live span — only the export wrapper).
+	defer p.retainFinalizedRootsAndClear(named)
+
 	stamped := p.stampSelfDurationAndMetrics(named)
 
 	trimmed := selectSlowestSpans(stamped, p.maxNodes, findTransactionRootSpanIDs(stamped))
@@ -116,14 +120,30 @@ func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlyS
 	return out
 }
 
-func (p *TransactionSpanProcessor) popChildIntervals(spans []sdktrace.ReadOnlySpan) {
+func (p *TransactionSpanProcessor) retainFinalizedRootsAndClear(spans []sdktrace.ReadOnlySpan) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	txnName := ""
+	for _, s := range spans {
+		if v := transactionAttr(s); v != "" {
+			txnName = v
+			break
+		}
+	}
+
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
 		delete(p.childIntervals, sid)
+		if isTransactionRoot(s) && txnName != "" {
+			p.membership[sid] = spanMembership{
+				inheritedName: txnName,
+				finalized:     true,
+			}
+			continue
+		}
 		delete(p.membership, sid)
 	}
-	p.mu.Unlock()
 }
 
 func findTransactionRootSpanIDs(spans []sdktrace.ReadOnlySpan) []tracecore.SpanID {
@@ -279,12 +299,12 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
 	}
 }
 
-func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) {
+func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
 	// Hold exportMu across drain+export so Shutdown cannot shut down between them.
 	p.exportMu.Lock()
 	defer p.exportMu.Unlock()
 	if p.exporterShutdown.Load() {
-		return
+		return nil
 	}
 	p.harvestMu.Lock()
 	winners := p.harvest.drain()
@@ -293,14 +313,21 @@ func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for _, w := range winners {
+	for i, w := range winners {
 		if p.exporter == nil || len(w.spans) == 0 {
 			continue
 		}
 		if err := p.exporter.ExportSpans(ctx, w.spans); err != nil {
 			otel.Handle(err)
+			// Put the failed winner and any not-yet-exported traces back so a
+			// later ForceFlush can retry (drain permanently removes them).
+			p.harvestMu.Lock()
+			p.harvest.restore(winners[i:])
+			p.harvestMu.Unlock()
+			return err
 		}
 	}
+	return nil
 }
 
 func (p *TransactionSpanProcessor) exportSpans(spans []sdktrace.ReadOnlySpan) {

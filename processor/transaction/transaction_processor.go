@@ -40,6 +40,9 @@ const (
 type spanMembership struct {
 	// inheritedName is set when the parent transaction name comes only from
 	// TraceState / attrs without a locally tracked root (finalize fallback).
+	// After a root is exported, membership is retained as a finalized tombstone
+	// with inheritedName holding the stamped transaction name (JS writes the
+	// name onto the span object; Go cannot mutate ended spans).
 	inheritedName string
 	// startName is the span name observed at OnStart (before UpdateName).
 	startName string
@@ -47,6 +50,9 @@ type spanMembership struct {
 	// final span name (Express route template / StartNewTransaction). Sampler
 	// echoes of the early span name are not overrides.
 	overrideName string
+	// finalized marks a post-export tombstone used by late fire-and-forget
+	// children to inherit the parent's stamped transaction name.
+	finalized bool
 }
 
 type traceBuffer struct {
@@ -194,7 +200,7 @@ func (p *TransactionSpanProcessor) startHarvester() {
 		for {
 			select {
 			case <-p.harvestTicker.C:
-				p.flushHarvest(context.Background())
+				_ = p.flushHarvest(context.Background())
 			case <-p.harvestStopCh:
 				return
 			}
@@ -381,16 +387,21 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		}
 		p.mu.Unlock()
 
-		p.flushHarvest(exportCtx)
+		if err := p.flushHarvest(exportCtx); err != nil && p.shutdownErr == nil {
+			p.shutdownErr = err
+		}
 
 		p.mu.Lock()
 		p.childIntervals = make(map[tracecore.SpanID][]interval)
+		p.membership = make(map[tracecore.SpanID]spanMembership)
 		p.mu.Unlock()
 
 		p.exportMu.Lock()
 		p.exporterShutdown.Store(true)
 		if p.exporter != nil {
-			p.shutdownErr = p.exporter.Shutdown(ctx)
+			if err := p.exporter.Shutdown(ctx); err != nil && p.shutdownErr == nil {
+				p.shutdownErr = err
+			}
 		}
 		p.exportCtx = nil
 		p.exportMu.Unlock()
@@ -442,7 +453,9 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
-	p.flushHarvest(ctx)
+	if err := p.flushHarvest(ctx); err != nil {
+		return err
+	}
 	p.exportMu.Lock()
 	defer p.exportMu.Unlock()
 	if p.exporterShutdown.Load() {

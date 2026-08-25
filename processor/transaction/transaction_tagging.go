@@ -85,6 +85,9 @@ func resolveParentInfo(
 ) (name string, hasTxn bool, hasLocalRoot bool) {
 	if parent.IsValid() && tracked != nil {
 		if m, ok := tracked[parent.SpanID()]; ok {
+			if m.finalized {
+				return m.inheritedName, true, false
+			}
 			return m.inheritedName, true, true
 		}
 	}
