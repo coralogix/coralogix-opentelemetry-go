@@ -380,6 +380,45 @@ func TestTagTransaction_LateChildFromFinalizedNonRootInheritsName(t *testing.T) 
 	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_LateGrandchildKeepsInheritedName(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-grandchild-inherit")
+
+	rootCtx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /orders")
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 1)
+	exporter.Reset()
+
+	// Late child inherits from finalizedNames; its child starts while the late
+	// child is still tracked and must keep the same inherited name.
+	lateCtx, late := tracer.Start(rootCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, grandchild := tracer.Start(lateCtx, "late-grandchild",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	grandchild.End()
+	late.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	assertAttribute(t, findSpan(t, spans, "late-child").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertNoAttribute(t, findSpan(t, spans, "late-child").Attributes, sampler.TransactionIdentifierRoot)
+	assertNoAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,

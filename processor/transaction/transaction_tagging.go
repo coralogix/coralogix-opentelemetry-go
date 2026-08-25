@@ -32,8 +32,12 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 
 	inheritedName := ""
 	if !starts {
-		name, hasName, hasLocalRoot := resolveParentInfo(ctx, parent, tracked, finalized)
-		if hasName && name != "" && !hasLocalRoot {
+		name, hasName, _ := resolveParentInfo(ctx, parent, tracked, finalized)
+		// Keep a nonempty parent name even when the parent is still tracked.
+		// Late children that inherited from finalizedNames / TraceState must
+		// pass that name to their own children; otherwise rootless leftover
+		// partitioning stamps the grandchild as a separate transaction.
+		if hasName && name != "" {
 			inheritedName = name
 		}
 	}
