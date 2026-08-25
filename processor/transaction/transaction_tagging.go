@@ -21,7 +21,7 @@ import (
 // with a different name) are recorded in membership. Sampler echoes that copy
 // the early span name into cgx.transaction are not treated as overrides, so
 // UpdateName can still supply the final transaction name.
-func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]string) {
+func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]finalizedTxn) {
 	parent := s.Parent()
 	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked, finalized)
 
@@ -80,7 +80,7 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 // transaction tree. Prefers the OnStart side table (attrs are not stamped on
 // inherit children until finalize), then finalized-name cache, then live
 // parent attrs / tracestate.
-func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]string) bool {
+func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]finalizedTxn) bool {
 	if parent.IsValid() && tracked != nil {
 		if _, ok := tracked[parent.SpanID()]; ok {
 			return true
@@ -103,7 +103,7 @@ func resolveParentInfo(
 	ctx context.Context,
 	parent tracecore.SpanContext,
 	tracked map[tracecore.SpanID]spanMembership,
-	finalized map[tracecore.SpanID]string,
+	finalized map[tracecore.SpanID]finalizedTxn,
 ) (name string, hasTxn bool, hasLocalRoot bool, inheritedFrom tracecore.SpanID) {
 	if parent.IsValid() && tracked != nil {
 		if m, ok := tracked[parent.SpanID()]; ok {
@@ -118,8 +118,12 @@ func resolveParentInfo(
 		}
 	}
 	if parent.IsValid() && finalized != nil {
-		if n, ok := finalized[parent.SpanID()]; ok {
-			return n, true, false, parent.SpanID()
+		if entry, ok := finalized[parent.SpanID()]; ok {
+			from := entry.rootID
+			if !from.IsValid() {
+				from = parent.SpanID()
+			}
+			return entry.name, true, false, from
 		}
 	}
 

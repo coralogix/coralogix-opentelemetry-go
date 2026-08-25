@@ -542,6 +542,49 @@ func TestTagTransaction_SameNameFinalizedRootsPartitionSeparately(t *testing.T) 
 	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "POST /webhook")
 }
 
+func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+		WithMaxNodes(1),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("same-txn-identity")
+
+	rootCtx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /orders")
+	midCtx, mid := tracer.Start(rootCtx, "handler",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	mid.End()
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	// maxNodes=1 keeps only the root from the first batch; membership names are
+	// still retained for both spans before trim.
+	require.NotEmpty(t, exporter.GetSpans())
+	exporter.Reset()
+
+	// Late children from different spans of the SAME finalized transaction must
+	// share one identity (and thus one maxNodes=1 budget), not two.
+	_, fromRoot := tracer.Start(rootCtx, "late-from-root",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, fromMid := tracer.Start(midCtx, "late-from-mid",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	fromRoot.End()
+	fromMid.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1, "same transaction identity must share one maxNodes budget")
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "GET /orders")
+}
+
 func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,

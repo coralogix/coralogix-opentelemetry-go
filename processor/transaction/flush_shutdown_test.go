@@ -662,3 +662,52 @@ func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
+
+func TestAcceptCompleted_PublishesFinalizedNameBeforeExport(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exporter := &gatedStickyExporter{started: started, release: release}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("publish-before-export")
+
+	rootCtx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /orders")
+
+	ended := make(chan struct{})
+	go func() {
+		root.End()
+		close(ended)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("root export did not reach ExportSpans")
+	}
+
+	// While root export is blocked, a late child must already see the stamped name.
+	_, late := tracer.Start(rootCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	late.End()
+
+	close(release)
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("root.End did not return after export release")
+	}
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.get()
+	require.GreaterOrEqual(t, len(spans), 2)
+	lateStub := findSpan(t, spans, "late-child")
+	require.NotNil(t, lateStub)
+	assertAttribute(t, lateStub.Attributes, sampler.TransactionIdentifier, "GET /orders")
+}

@@ -58,6 +58,13 @@ type spanMembership struct {
 	finalized bool
 }
 
+// finalizedTxn is a post-export lookup entry: display name plus the local
+// transaction root identity used for rootless partitioning.
+type finalizedTxn struct {
+	name   string
+	rootID tracecore.SpanID
+}
+
 type traceBuffer struct {
 	spans               []sdktrace.ReadOnlySpan
 	liveParents         map[tracecore.SpanID]tracecore.SpanID
@@ -79,10 +86,10 @@ type TransactionSpanProcessor struct {
 	membership     map[tracecore.SpanID]spanMembership
 	childIntervals map[tracecore.SpanID][]interval
 
-	// finalizedNames retains stamped txn names after active membership is
-	// cleared so late children can inherit. finalizedOrder is FIFO insertion
-	// order for eviction when over maxFinalizedNames.
-	finalizedNames    map[tracecore.SpanID]string
+	// finalizedNames retains stamped txn names + root identity after active
+	// membership is cleared so late children can inherit. finalizedOrder is
+	// FIFO insertion order for eviction when over maxFinalizedNames.
+	finalizedNames    map[tracecore.SpanID]finalizedTxn
 	finalizedOrder    []tracecore.SpanID
 	maxFinalizedNames int
 
@@ -191,7 +198,7 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
 		membership:         make(map[tracecore.SpanID]spanMembership),
 		childIntervals:     make(map[tracecore.SpanID][]interval),
-		finalizedNames:     make(map[tracecore.SpanID]string),
+		finalizedNames:     make(map[tracecore.SpanID]finalizedTxn),
 		maxNodes:           maxNodes,
 		maxRegularTraces:   maxRegularTraces,
 		harvestPeriod:      harvestPeriod,
@@ -417,7 +424,7 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.mu.Lock()
 		p.childIntervals = make(map[tracecore.SpanID][]interval)
 		p.membership = make(map[tracecore.SpanID]spanMembership)
-		p.finalizedNames = make(map[tracecore.SpanID]string)
+		p.finalizedNames = make(map[tracecore.SpanID]finalizedTxn)
 		p.finalizedOrder = nil
 		p.mu.Unlock()
 

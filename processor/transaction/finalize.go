@@ -22,12 +22,10 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 
 	tracked := p.snapshotMembership(spans)
 	named := stampTransactionAttributes(spans, tracked)
-	// Retain stamped names before clearing active membership so late children
-	// can inherit (processor-only spans never wrote cgx.transaction onto the
-	// live span — only the export wrapper).
-	defer p.retainFinalizedNamesAndClear(named)
-
 	stamped := p.stampSelfDurationAndMetrics(named)
+	// Publish finalized names before any blocking export so late children that
+	// start while ExportSpans runs inherit the stamped transaction identity.
+	p.retainFinalizedNamesAndClear(named)
 
 	// Each local transaction gets its own maxNodes budget and harvest slot.
 	// Rootless leftovers may still arrive as one mixed slice before extract
@@ -152,27 +150,49 @@ func (p *TransactionSpanProcessor) retainFinalizedNamesAndClear(spans []sdktrace
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Resolve the local transaction root identity before clearing membership.
+	txnRoot := tracecore.SpanID{}
+	for _, s := range spans {
+		if isTransactionRoot(s) {
+			txnRoot = s.SpanContext().SpanID()
+			break
+		}
+	}
+	if !txnRoot.IsValid() {
+		for _, s := range spans {
+			if m, ok := p.membership[s.SpanContext().SpanID()]; ok && m.inheritedFrom.IsValid() {
+				txnRoot = m.inheritedFrom
+				break
+			}
+		}
+	}
+
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
 		delete(p.childIntervals, sid)
 		delete(p.membership, sid)
 		if name := transactionAttr(s); name != "" {
-			p.putFinalizedNameLocked(sid, name)
+			rootID := txnRoot
+			if !rootID.IsValid() {
+				rootID = sid
+			}
+			p.putFinalizedNameLocked(sid, name, rootID)
 		}
 	}
 }
 
-// putFinalizedNameLocked inserts or updates a finalized SpanID→name entry and
+// putFinalizedNameLocked inserts or updates a finalized SpanID→txn entry and
 // evicts the oldest entries when over maxFinalizedNames. Caller must hold p.mu.
-func (p *TransactionSpanProcessor) putFinalizedNameLocked(id tracecore.SpanID, name string) {
+func (p *TransactionSpanProcessor) putFinalizedNameLocked(id tracecore.SpanID, name string, rootID tracecore.SpanID) {
 	if name == "" {
 		return
 	}
+	entry := finalizedTxn{name: name, rootID: rootID}
 	if _, exists := p.finalizedNames[id]; exists {
-		p.finalizedNames[id] = name
+		p.finalizedNames[id] = entry
 		return
 	}
-	p.finalizedNames[id] = name
+	p.finalizedNames[id] = entry
 	p.finalizedOrder = append(p.finalizedOrder, id)
 	for len(p.finalizedNames) > p.maxFinalizedNames {
 		oldest := p.finalizedOrder[0]
