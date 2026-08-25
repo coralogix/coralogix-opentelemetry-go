@@ -176,9 +176,14 @@ func stampTransactionAttributes(
 
 // resolveTransactionName prefers an explicit override over the root's final
 // Name(). Sampler-injected cgx.transaction that merely echoed the OnStart name
-// is ignored so UpdateName can win (JS/Java preserve intentional templates via
-// attr≠start-name; StartNewTransaction after start is attr≠startName).
+// is ignored so UpdateName can win. StartNewTransaction sets
+// cgx.transaction.explicit so equal-name overrides still win after a rename.
 func resolveTransactionName(root sdktrace.ReadOnlySpan, tracked map[tracecore.SpanID]spanMembership) string {
+	if hasExplicitTransactionOverride(root) {
+		if v := transactionAttr(root); v != "" {
+			return v
+		}
+	}
 	if tracked != nil {
 		if m, ok := tracked[root.SpanContext().SpanID()]; ok {
 			if m.overrideName != "" {
@@ -190,6 +195,16 @@ func resolveTransactionName(root sdktrace.ReadOnlySpan, tracked map[tracecore.Sp
 		}
 	}
 	return root.Name()
+}
+
+func hasExplicitTransactionOverride(span sdktrace.ReadOnlySpan) bool {
+	key := attribute.Key(sampler.TransactionIdentifierExplicit)
+	for _, a := range span.Attributes() {
+		if a.Key == key && a.Value.AsBool() {
+			return true
+		}
+	}
+	return false
 }
 
 func transactionAttr(span sdktrace.ReadOnlySpan) string {

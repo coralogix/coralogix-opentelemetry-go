@@ -128,6 +128,24 @@ func TestTagTransaction_StartNewTransactionOverrideIsRespected(t *testing.T) {
 	assertNoAttribute(t, subStub.Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_StartNewTransactionEqualNameSurvivesRename(t *testing.T) {
+	exporter, tracer, shutdown := newTracerProvider(t)
+	defer shutdown()
+
+	_, span := tracer.Start(context.Background(), "flow",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	sampler.StartNewTransaction(span, "flow")
+	span.SetName("renamed-operation")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "flow")
+	assertBoolAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot, true)
+	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierExplicit)
+}
+
 func TestTagTransaction_PreservesPreSetTransactionName(t *testing.T) {
 	exporter, tracer, shutdown := newTracerProvider(t)
 	defer shutdown()

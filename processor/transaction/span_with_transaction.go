@@ -28,8 +28,9 @@ func (s spanWithTransaction) Attributes() []attribute.KeyValue {
 	out := make([]attribute.KeyValue, 0, len(original)+2)
 	txnKey := attribute.Key(sampler.TransactionIdentifier)
 	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
+	explicitKey := attribute.Key(sampler.TransactionIdentifierExplicit)
 	for _, a := range original {
-		if a.Key == txnKey || a.Key == rootKey {
+		if a.Key == txnKey || a.Key == rootKey || a.Key == explicitKey {
 			continue
 		}
 		out = append(out, a)
