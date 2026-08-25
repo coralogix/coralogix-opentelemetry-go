@@ -2,8 +2,10 @@ package transaction
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -270,7 +272,7 @@ func TestTagTransaction_LateChildInheritsProcessorOnlyFinalizedName(t *testing.T
 	tracer := tp.Tracer("late-child-processor-only")
 
 	// Processor-only root: no StartNewTransaction / sampler attr. Final name
-	// exists only on the export wrapper unless we retain a membership tombstone.
+	// exists only on the export wrapper unless we retain a finalized-name entry.
 	rootCtx, root := tracer.Start(context.Background(), "GET",
 		tracecore.WithSpanKind(tracecore.SpanKindServer),
 	)
@@ -291,6 +293,100 @@ func TestTagTransaction_LateChildInheritsProcessorOnlyFinalizedName(t *testing.T
 	require.Len(t, spans, 1)
 	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "GET /myroute")
 	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
+func TestTagTransaction_LateChildFromFinalizedNonRootInheritsName(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-child-non-root")
+
+	rootCtx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.SetName("GET /orders")
+	midCtx, mid := tracer.Start(rootCtx, "handler",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	mid.End()
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 2)
+	assertAttribute(t, findSpan(t, exporter.GetSpans(), "handler").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertNoAttribute(t, findSpan(t, exporter.GetSpans(), "handler").Attributes, sampler.TransactionIdentifierRoot)
+	exporter.Reset()
+
+	// Late child started from the ended NON-ROOT parent's context.
+	_, late := tracer.Start(midCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	late.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
+func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+		WithMaxFinalizedNames(2),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("finalized-cap")
+
+	// Processor-only SERVER roots so inheritance depends on the finalized cache
+	// (live spans never received cgx.transaction).
+	var rootCtxs []context.Context
+	for i := 0; i < 3; i++ {
+		ctx, root := tracer.Start(context.Background(), "GET",
+			tracecore.WithSpanKind(tracecore.SpanKindServer),
+		)
+		root.SetName("GET /route-" + strconv.Itoa(i))
+		root.End()
+		require.NoError(t, processor.ForceFlush(context.Background()))
+		require.Len(t, exporter.GetSpans(), 1)
+		exporter.Reset()
+		rootCtxs = append(rootCtxs, ctx)
+	}
+
+	_, fromOldest := tracer.Start(rootCtxs[0], "late-oldest",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	fromOldest.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	oldestSpans := exporter.GetSpans()
+	require.Len(t, oldestSpans, 1)
+	assert.NotEqual(t, "GET /route-0", attrString(oldestSpans[0].Attributes, sampler.TransactionIdentifier))
+	exporter.Reset()
+
+	_, fromRecent := tracer.Start(rootCtxs[2], "late-recent",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	fromRecent.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	recentSpans := exporter.GetSpans()
+	require.Len(t, recentSpans, 1)
+	assertAttribute(t, recentSpans[0].Attributes, sampler.TransactionIdentifier, "GET /route-2")
+	assertNoAttribute(t, recentSpans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
+func attrString(attrs []attribute.KeyValue, key string) string {
+	for _, a := range attrs {
+		if string(a.Key) == key {
+			return a.Value.AsString()
+		}
+	}
+	return ""
 }
 
 func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t *testing.T) {

@@ -39,10 +39,8 @@ const (
 
 type spanMembership struct {
 	// inheritedName is set when the parent transaction name comes only from
-	// TraceState / attrs without a locally tracked root (finalize fallback).
-	// After a root is exported, membership is retained as a finalized tombstone
-	// with inheritedName holding the stamped transaction name (JS writes the
-	// name onto the span object; Go cannot mutate ended spans).
+	// TraceState / attrs without a locally tracked root (finalize fallback),
+	// or when inheriting from a finalized parent name in the side cache.
 	inheritedName string
 	// startName is the span name observed at OnStart (before UpdateName).
 	startName string
@@ -51,7 +49,8 @@ type spanMembership struct {
 	// echoes of the early span name are not overrides.
 	overrideName string
 	// finalized marks a post-export tombstone used by late fire-and-forget
-	// children to inherit the parent's stamped transaction name.
+	// children to inherit the parent's stamped transaction name. Active
+	// membership no longer stores these; see finalizedNames.
 	finalized bool
 }
 
@@ -75,6 +74,13 @@ type TransactionSpanProcessor struct {
 	traces         map[tracecore.TraceID]*traceBuffer
 	membership     map[tracecore.SpanID]spanMembership
 	childIntervals map[tracecore.SpanID][]interval
+
+	// finalizedNames retains stamped txn names after active membership is
+	// cleared so late children can inherit. finalizedOrder is FIFO insertion
+	// order for eviction when over maxFinalizedNames.
+	finalizedNames    map[tracecore.SpanID]string
+	finalizedOrder    []tracecore.SpanID
+	maxFinalizedNames int
 
 	selfDurationHistogram syncfloat64.Histogram
 
@@ -149,6 +155,15 @@ func WithCompletionHoldback(d time.Duration) Option {
 	}
 }
 
+// WithMaxFinalizedNames caps SpanID→transaction-name entries retained after a
+// local batch is finalized (for late fire-and-forget children). When n <= 0,
+// DefaultMaxFinalizedNames is used.
+func WithMaxFinalizedNames(n int) Option {
+	return func(p *TransactionSpanProcessor) {
+		p.maxFinalizedNames = n
+	}
+}
+
 func newSelfDurationHistogram(meterProvider metric.MeterProvider) syncfloat64.Histogram {
 	meter := meterProvider.Meter(instrumentationName)
 	histogram, err := meter.SyncFloat64().Histogram(
@@ -172,6 +187,7 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
 		membership:         make(map[tracecore.SpanID]spanMembership),
 		childIntervals:     make(map[tracecore.SpanID][]interval),
+		finalizedNames:     make(map[tracecore.SpanID]string),
 		maxNodes:           maxNodes,
 		maxRegularTraces:   maxRegularTraces,
 		harvestPeriod:      harvestPeriod,
@@ -180,6 +196,9 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 	p.idle = sync.NewCond(&p.mu)
 	for _, opt := range opts {
 		opt(p)
+	}
+	if p.maxFinalizedNames <= 0 {
+		p.maxFinalizedNames = DefaultMaxFinalizedNames
 	}
 	if p.selfDurationHistogram == nil {
 		p.selfDurationHistogram = newSelfDurationHistogram(global.MeterProvider())
@@ -226,13 +245,13 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 	defer p.mu.Unlock()
 
 	if p.exporterShutdown.Load() {
-		beginTransaction(ctx, s, nil)
+		beginTransaction(ctx, s, nil, nil)
 		return
 	}
 	tb, ok := p.traces[traceID]
 	if !ok {
 		if p.stopped {
-			beginTransaction(ctx, s, nil)
+			beginTransaction(ctx, s, nil, nil)
 			return
 		}
 		tb = &traceBuffer{
@@ -243,7 +262,7 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 	if tb.liveParents == nil {
 		tb.liveParents = make(map[tracecore.SpanID]tracecore.SpanID)
 	}
-	beginTransaction(ctx, s, p.membership)
+	beginTransaction(ctx, s, p.membership, p.finalizedNames)
 
 	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
 	if p.stopped {
@@ -394,6 +413,8 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.mu.Lock()
 		p.childIntervals = make(map[tracecore.SpanID][]interval)
 		p.membership = make(map[tracecore.SpanID]spanMembership)
+		p.finalizedNames = make(map[tracecore.SpanID]string)
+		p.finalizedOrder = nil
 		p.mu.Unlock()
 
 		p.exportMu.Lock()

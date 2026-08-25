@@ -22,10 +22,10 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 
 	tracked := p.snapshotMembership(spans)
 	named := stampTransactionAttributes(spans, tracked)
-	// Retain finalized root names before clearing active membership so late
-	// children can inherit (processor-only roots never wrote cgx.transaction
-	// onto the live span — only the export wrapper).
-	defer p.retainFinalizedRootsAndClear(named)
+	// Retain stamped names before clearing active membership so late children
+	// can inherit (processor-only spans never wrote cgx.transaction onto the
+	// live span — only the export wrapper).
+	defer p.retainFinalizedNamesAndClear(named)
 
 	stamped := p.stampSelfDurationAndMetrics(named)
 
@@ -120,29 +120,36 @@ func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlyS
 	return out
 }
 
-func (p *TransactionSpanProcessor) retainFinalizedRootsAndClear(spans []sdktrace.ReadOnlySpan) {
+func (p *TransactionSpanProcessor) retainFinalizedNamesAndClear(spans []sdktrace.ReadOnlySpan) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	txnName := ""
-	for _, s := range spans {
-		if v := transactionAttr(s); v != "" {
-			txnName = v
-			break
-		}
-	}
 
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
 		delete(p.childIntervals, sid)
-		if isTransactionRoot(s) && txnName != "" {
-			p.membership[sid] = spanMembership{
-				inheritedName: txnName,
-				finalized:     true,
-			}
-			continue
-		}
 		delete(p.membership, sid)
+		if name := transactionAttr(s); name != "" {
+			p.putFinalizedNameLocked(sid, name)
+		}
+	}
+}
+
+// putFinalizedNameLocked inserts or updates a finalized SpanID→name entry and
+// evicts the oldest entries when over maxFinalizedNames. Caller must hold p.mu.
+func (p *TransactionSpanProcessor) putFinalizedNameLocked(id tracecore.SpanID, name string) {
+	if name == "" {
+		return
+	}
+	if _, exists := p.finalizedNames[id]; exists {
+		p.finalizedNames[id] = name
+		return
+	}
+	p.finalizedNames[id] = name
+	p.finalizedOrder = append(p.finalizedOrder, id)
+	for len(p.finalizedNames) > p.maxFinalizedNames {
+		oldest := p.finalizedOrder[0]
+		p.finalizedOrder = p.finalizedOrder[1:]
+		delete(p.finalizedNames, oldest)
 	}
 }
 

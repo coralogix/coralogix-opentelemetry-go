@@ -21,9 +21,9 @@ import (
 // with a different name) are recorded in membership. Sampler echoes that copy
 // the early span name into cgx.transaction are not treated as overrides, so
 // UpdateName can still supply the final transaction name.
-func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership) {
+func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]string) {
 	parent := s.Parent()
-	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked)
+	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked, finalized)
 
 	starts := !hasLocalTxn ||
 		parent.IsRemote() ||
@@ -32,7 +32,7 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 
 	inheritedName := ""
 	if !starts {
-		name, hasName, hasLocalRoot := resolveParentInfo(ctx, parent, tracked)
+		name, hasName, hasLocalRoot := resolveParentInfo(ctx, parent, tracked, finalized)
 		if hasName && name != "" && !hasLocalRoot {
 			inheritedName = name
 		}
@@ -64,14 +64,20 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 
 // hasLocalTransaction reports whether the parent is already part of a local
 // transaction tree. Prefers the OnStart side table (attrs are not stamped on
-// inherit children until finalize), then live parent attrs / tracestate.
-func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership) bool {
+// inherit children until finalize), then finalized-name cache, then live
+// parent attrs / tracestate.
+func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]string) bool {
 	if parent.IsValid() && tracked != nil {
 		if _, ok := tracked[parent.SpanID()]; ok {
 			return true
 		}
 	}
-	_, has, _ := resolveParentInfo(ctx, parent, tracked)
+	if parent.IsValid() && finalized != nil {
+		if _, ok := finalized[parent.SpanID()]; ok {
+			return true
+		}
+	}
+	_, has, _ := resolveParentInfo(ctx, parent, tracked, finalized)
 	return has
 }
 
@@ -82,6 +88,7 @@ func resolveParentInfo(
 	ctx context.Context,
 	parent tracecore.SpanContext,
 	tracked map[tracecore.SpanID]spanMembership,
+	finalized map[tracecore.SpanID]string,
 ) (name string, hasTxn bool, hasLocalRoot bool) {
 	if parent.IsValid() && tracked != nil {
 		if m, ok := tracked[parent.SpanID()]; ok {
@@ -89,6 +96,11 @@ func resolveParentInfo(
 				return m.inheritedName, true, false
 			}
 			return m.inheritedName, true, true
+		}
+	}
+	if parent.IsValid() && finalized != nil {
+		if n, ok := finalized[parent.SpanID()]; ok {
+			return n, true, false
 		}
 	}
 
@@ -107,8 +119,8 @@ func resolveParentInfo(
 			if isRoot {
 				// hasLocalRoot only when the parent is still in the membership
 				// side-table. A finalized root may still expose attrs via Context
-				// but must be treated as an inherited name source (JS: rootSpanId
-				// undefined when membership was cleared).
+				// but must be treated as an inherited name source once membership
+				// was cleared.
 				sc := rw.SpanContext()
 				local := tracked != nil && sc.IsValid()
 				if local {

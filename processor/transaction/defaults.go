@@ -15,6 +15,9 @@ const (
 	DefaultCompletionHoldback       = 100 * time.Millisecond
 	DefaultHarvestPeriodMillis      = 60_000
 	DefaultCompletionHoldbackMillis = 100
+	// DefaultMaxFinalizedNames caps post-export SpanID→txn-name entries retained
+	// for late fire-and-forget children.
+	DefaultMaxFinalizedNames = 16384
 )
 
 // Env vars read by NewTransactionSpanProcessor when the matching Option is omitted.
