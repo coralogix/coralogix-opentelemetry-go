@@ -507,6 +507,75 @@ func TestExporterShutdown_AtomicVisibleAcrossMuAndExportMu(t *testing.T) {
 	_ = tp.Shutdown(context.Background())
 }
 
+func TestForceFlush_ReturnsWhenContextExpiresDuringPendingFinalize(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exporter := &gatedStickyExporter{started: started, release: release}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(time.Hour),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("flush-ctx-timeout")
+	base := time.Unix(0, 0)
+
+	_, span := tracer.Start(context.Background(), "blocked",
+		tracecore.WithTimestamp(base),
+	)
+	span.End(tracecore.WithTimestamp(base.Add(5 * time.Millisecond)))
+
+	// First ForceFlush drains holdback and blocks inside ExportSpans.
+	flush1 := make(chan error, 1)
+	go func() {
+		flush1 <- processor.ForceFlush(context.Background())
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first ForceFlush did not reach ExportSpans")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := processor.ForceFlush(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	close(release)
+	require.NoError(t, <-flush1)
+	_ = tp.Shutdown(context.Background())
+}
+
+func TestForceFlush_DoesNotPublishContextToConcurrentExports(t *testing.T) {
+	exporter := &ctxCaptureExporter{}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("flush-ctx-isolation")
+	base := time.Unix(0, 0)
+
+	flushCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, span := tracer.Start(context.Background(), "root",
+		tracecore.WithTimestamp(base),
+	)
+	span.End(tracecore.WithTimestamp(base.Add(5 * time.Millisecond)))
+
+	require.NoError(t, processor.ForceFlush(flushCtx))
+	cancel()
+
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	require.NotEmpty(t, exporter.ctxs)
+	for _, c := range exporter.ctxs {
+		assert.NoError(t, c.Err(), "acceptCompleted export must not use ForceFlush context")
+	}
+	_ = tp.Shutdown(context.Background())
+}
+
 func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

@@ -102,7 +102,16 @@ func resolveParentInfo(
 				}
 			}
 			if isRoot {
-				return txnName, true, true
+				// hasLocalRoot only when the parent is still in the membership
+				// side-table. A finalized root may still expose attrs via Context
+				// but must be treated as an inherited name source (JS: rootSpanId
+				// undefined when membership was cleared).
+				sc := rw.SpanContext()
+				local := tracked != nil && sc.IsValid()
+				if local {
+					_, local = tracked[sc.SpanID()]
+				}
+				return txnName, true, local
 			}
 			if txnName != "" {
 				sc := rw.SpanContext()

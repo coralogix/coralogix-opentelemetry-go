@@ -226,6 +226,39 @@ func TestTagTransaction_StartNewTransactionDifferentNameWins(t *testing.T) {
 	assertBoolAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot, true)
 }
 
+func TestTagTransaction_LateChildInheritsFinalizedParentName(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-child-inherit")
+
+	rootCtx, root := tracer.Start(context.Background(), "parent-op",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	sampler.StartNewTransaction(root, "parent-txn")
+	root.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 1)
+	exporter.Reset()
+
+	// Fire-and-forget child after the root batch was already finalized. Parent
+	// is gone from membership but still readable via Context with attrs.
+	_, child := tracer.Start(rootCtx, "late-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	child.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "parent-txn")
+	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t *testing.T) {
 	exporter, tracer, shutdown := newTracerProvider(t)
 	defer shutdown()

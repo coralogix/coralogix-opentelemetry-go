@@ -279,7 +279,7 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
 	}
 }
 
-func (p *TransactionSpanProcessor) flushHarvest() {
+func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) {
 	// Hold exportMu across drain+export so Shutdown cannot shut down between them.
 	p.exportMu.Lock()
 	defer p.exportMu.Unlock()
@@ -290,7 +290,6 @@ func (p *TransactionSpanProcessor) flushHarvest() {
 	winners := p.harvest.drain()
 	p.harvestMu.Unlock()
 
-	ctx := p.exportCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}

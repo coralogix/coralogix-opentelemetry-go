@@ -194,7 +194,7 @@ func (p *TransactionSpanProcessor) startHarvester() {
 		for {
 			select {
 			case <-p.harvestTicker.C:
-				p.flushHarvest()
+				p.flushHarvest(context.Background())
 			case <-p.harvestStopCh:
 				return
 			}
@@ -381,7 +381,7 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		}
 		p.mu.Unlock()
 
-		p.flushHarvest()
+		p.flushHarvest(exportCtx)
 
 		p.mu.Lock()
 		p.childIntervals = make(map[tracecore.SpanID][]interval)
@@ -426,16 +426,9 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 		return nil
 	}
 
-	p.exportMu.Lock()
-	p.exportCtx = ctx
-	p.exportMu.Unlock()
-	defer func() {
-		p.exportMu.Lock()
-		if p.exportCtx == ctx {
-			p.exportCtx = nil
-		}
-		p.exportMu.Unlock()
-	}()
+	// Do not publish ctx onto p.exportCtx: concurrent OnEnd/acceptCompleted
+	// exports must keep using Background (or Shutdown's drain context), not a
+	// ForceFlush deadline that may expire mid-export.
 
 	p.mu.Lock()
 	if p.exporterShutdown.Load() {
@@ -443,12 +436,13 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 		return nil
 	}
 	p.flushPendingCompletionsLocked()
-	for p.pendingFinalize > 0 {
-		p.idle.Wait()
+	if err := p.waitPendingFinalizeLocked(ctx); err != nil {
+		p.mu.Unlock()
+		return err
 	}
 	p.mu.Unlock()
 
-	p.flushHarvest()
+	p.flushHarvest(ctx)
 	p.exportMu.Lock()
 	defer p.exportMu.Unlock()
 	if p.exporterShutdown.Load() {
@@ -456,6 +450,33 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 	}
 	if flusher, ok := p.exporter.(interface{ ForceFlush(context.Context) error }); ok {
 		return flusher.ForceFlush(ctx)
+	}
+	return nil
+}
+
+// waitPendingFinalizeLocked waits until pendingFinalize is 0 or ctx is done.
+// Caller must hold p.mu. On context expiry returns ctx.Err().
+func (p *TransactionSpanProcessor) waitPendingFinalizeLocked(ctx context.Context) error {
+	if p.pendingFinalize == 0 {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			p.mu.Lock()
+			p.idle.Broadcast()
+			p.mu.Unlock()
+		case <-done:
+		}
+	}()
+	defer close(done)
+
+	for p.pendingFinalize > 0 && ctx.Err() == nil {
+		p.idle.Wait()
+	}
+	if p.pendingFinalize > 0 {
+		return ctx.Err()
 	}
 	return nil
 }
