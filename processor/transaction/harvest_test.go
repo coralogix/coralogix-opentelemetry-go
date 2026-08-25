@@ -65,6 +65,45 @@ func TestRegularTraceHeap_DrainClearsHeap(t *testing.T) {
 	assert.Empty(t, h.drain(), "drain must clear the heap")
 }
 
+func TestRegularTraceHeap_RestoreReappliesCapacity(t *testing.T) {
+	h := newRegularTraceHeap(1)
+	short := stubSpanWithRoot(t, "short", 1, 50, true)
+	long := stubSpanWithRoot(t, "long", 2, 200, true)
+
+	stubs := h.restore([]harvestTrace{
+		{durationNs: 50, spans: []sdktrace.ReadOnlySpan{short}},
+		{durationNs: 200, spans: []sdktrace.ReadOnlySpan{long}},
+	})
+	require.LessOrEqual(t, h.Len(), 1)
+	require.Len(t, stubs, 1)
+	assert.Equal(t, "short", stubs[0].Name())
+
+	drained := h.drain()
+	require.Len(t, drained, 1)
+	assert.Equal(t, int64(200), drained[0].durationNs)
+}
+
+func TestRegularTraceHeap_RestoreEvictsAgainstConcurrentRefill(t *testing.T) {
+	h := newRegularTraceHeap(1)
+	held := stubSpanWithRoot(t, "held", 1, 100, true)
+	concurrent := stubSpanWithRoot(t, "concurrent", 2, 150, true)
+
+	require.Nil(t, h.witness(harvestTrace{durationNs: 100, spans: []sdktrace.ReadOnlySpan{held}}))
+	drained := h.drain()
+	require.Len(t, drained, 1)
+
+	// Simulate another trace entering harvest while the flush export failed.
+	require.Nil(t, h.witness(harvestTrace{durationNs: 150, spans: []sdktrace.ReadOnlySpan{concurrent}}))
+	stubs := h.restore(drained)
+
+	require.LessOrEqual(t, h.Len(), 1)
+	require.Len(t, stubs, 1)
+	assert.Equal(t, "held", stubs[0].Name())
+	kept := h.drain()
+	require.Len(t, kept, 1)
+	assert.Equal(t, int64(150), kept[0].durationNs)
+}
+
 func TestRegularTraceHeap_KeepsSlowestNOfManyCompetitors(t *testing.T) {
 	h := newRegularTraceHeap(2)
 	durations := []int64{5, 50, 10, 100, 1, 30}

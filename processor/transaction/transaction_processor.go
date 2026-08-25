@@ -477,7 +477,9 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 	if err := p.flushHarvest(ctx); err != nil {
 		return err
 	}
-	p.exportMu.Lock()
+	if err := p.lockExportMu(ctx); err != nil {
+		return err
+	}
 	defer p.exportMu.Unlock()
 	if p.exporterShutdown.Load() {
 		return nil

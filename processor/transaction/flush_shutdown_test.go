@@ -546,6 +546,48 @@ func TestForceFlush_ReturnsWhenContextExpiresDuringPendingFinalize(t *testing.T)
 	_ = tp.Shutdown(context.Background())
 }
 
+func TestForceFlush_ReturnsWhenContextExpiresWaitingForExportMu(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exporter := &gatedStickyExporter{started: started, release: release}
+	// Harvest holds the completed trace until ForceFlush; first flush blocks in
+	// flushHarvest's ExportSpans (exportMu held, pendingFinalize already 0).
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(1),
+		WithHarvestPeriod(time.Hour),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("flush-export-mu-timeout")
+	base := time.Unix(0, 0)
+
+	_, span := tracer.Start(context.Background(), "held",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+		tracecore.WithTimestamp(base),
+	)
+	span.End(tracecore.WithTimestamp(base.Add(50 * time.Millisecond)))
+
+	flush1 := make(chan error, 1)
+	go func() {
+		flush1 <- processor.ForceFlush(context.Background())
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first ForceFlush did not reach ExportSpans via harvest")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := processor.ForceFlush(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	close(release)
+	require.NoError(t, <-flush1)
+	_ = tp.Shutdown(context.Background())
+}
+
 func TestForceFlush_DoesNotPublishContextToConcurrentExports(t *testing.T) {
 	exporter := &ctxCaptureExporter{}
 	processor := NewTransactionSpanProcessor(exporter,

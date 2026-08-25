@@ -65,12 +65,20 @@ func (r *regularTraceHeap) drain() []harvestTrace {
 	return traces
 }
 
-// restore puts drained traces back without applying harvest capacity eviction.
-// Used when a flush export fails so ForceFlush callers can retry.
-func (r *regularTraceHeap) restore(traces []harvestTrace) {
+// restore puts drained traces back via witness so maxTraces capacity is
+// re-applied (concurrent refill during a failed flush can leave traces in the
+// heap). Returns stub spans for any capacity evictions.
+func (r *regularTraceHeap) restore(traces []harvestTrace) []sdktrace.ReadOnlySpan {
+	var stubs []sdktrace.ReadOnlySpan
 	for _, t := range traces {
-		heap.Push(&r.heap, t)
+		stubs = append(stubs, r.witness(t)...)
 	}
+	return stubs
+}
+
+// Len reports how many traces are currently held. Used by tests.
+func (r *regularTraceHeap) Len() int {
+	return len(r.heap)
 }
 
 // harvestStubSpans returns the local-transaction root span(s) for APM presence when

@@ -306,9 +306,29 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
 	}
 }
 
+// lockExportMu acquires p.exportMu, or returns ctx.Err() if ctx expires first.
+func (p *TransactionSpanProcessor) lockExportMu(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if p.exportMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
 func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
 	// Hold exportMu across drain+export so Shutdown cannot shut down between them.
-	p.exportMu.Lock()
+	if err := p.lockExportMu(ctx); err != nil {
+		return err
+	}
 	defer p.exportMu.Unlock()
 	if p.exporterShutdown.Load() {
 		return nil
@@ -329,8 +349,13 @@ func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
 			// Put the failed winner and any not-yet-exported traces back so a
 			// later ForceFlush can retry (drain permanently removes them).
 			p.harvestMu.Lock()
-			p.harvest.restore(winners[i:])
+			stubs := p.harvest.restore(winners[i:])
 			p.harvestMu.Unlock()
+			if len(stubs) > 0 && p.exporter != nil {
+				if stubErr := p.exporter.ExportSpans(context.Background(), stubs); stubErr != nil {
+					otel.Handle(stubErr)
+				}
+			}
 			return err
 		}
 	}

@@ -166,22 +166,40 @@ func stampTransactionAttributes(
 	}
 
 	root := findTransactionRootSpan(spans)
-	var name string
 	if root != nil {
-		name = resolveTransactionName(root, tracked)
-	} else {
-		// Leftover flush without ROOT markers: prefer TraceState-inherited name.
+		name := resolveTransactionName(root, tracked)
+		out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
 		for _, s := range spans {
-			if tracked != nil {
-				if m, ok := tracked[s.SpanContext().SpanID()]; ok && m.inheritedName != "" {
-					name = m.inheritedName
-					break
-				}
+			out = append(out, withTransaction(s, name, isTransactionRoot(s)))
+		}
+		return out
+	}
+
+	// Leftover flush without ROOT markers: partition by inherited transaction
+	// so late children from different finalized txns on the same TraceID are
+	// not stamped with a single shared name.
+	partitions := make(map[string][]sdktrace.ReadOnlySpan)
+	var order []string
+	for _, s := range spans {
+		name := ""
+		if tracked != nil {
+			if m, ok := tracked[s.SpanContext().SpanID()]; ok {
+				name = m.inheritedName
 			}
 		}
+		if _, seen := partitions[name]; !seen {
+			order = append(order, name)
+		}
+		partitions[name] = append(partitions[name], s)
+	}
+
+	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
+	for _, key := range order {
+		part := partitions[key]
+		name := key
 		if name == "" {
-			fallback := spans[0]
-			for _, s := range spans {
+			fallback := part[0]
+			for _, s := range part {
 				if !s.Parent().IsValid() {
 					fallback = s
 					break
@@ -189,11 +207,9 @@ func stampTransactionAttributes(
 			}
 			name = resolveTransactionName(fallback, tracked)
 		}
-	}
-
-	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
-	for _, s := range spans {
-		out = append(out, withTransaction(s, name, isTransactionRoot(s)))
+		for _, s := range part {
+			out = append(out, withTransaction(s, name, isTransactionRoot(s)))
+		}
 	}
 	return out
 }

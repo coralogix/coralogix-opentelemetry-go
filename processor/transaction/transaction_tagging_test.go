@@ -228,6 +228,53 @@ func TestTagTransaction_StartNewTransactionDifferentNameWins(t *testing.T) {
 	assertBoolAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot, true)
 }
 
+func TestTagTransaction_LeftoverLateChildrenKeepOwnInheritedNames(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("leftover-partition")
+
+	// Two SERVER roots on the same TraceID (nested under one outer).
+	outerCtx, outer := tracer.Start(context.Background(), "gateway",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	aCtx, a := tracer.Start(outerCtx, "txn-a",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	bCtx, b := tracer.Start(outerCtx, "txn-b",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	b.End()
+	outer.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 3)
+	exporter.Reset()
+
+	// Late INTERNAL children under each finalized root; keep both live so they
+	// flush together as one leftover batch on the shared TraceID.
+	_, lateA := tracer.Start(aCtx, "late-a",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, lateB := tracer.Start(bCtx, "late-b",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	lateA.End()
+	lateB.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
+	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
+	assertNoAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifierRoot)
+	assertNoAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifierRoot)
+}
+
 func TestTagTransaction_LateChildInheritsFinalizedParentName(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
