@@ -672,6 +672,59 @@ func (e *ctxAwareBlockExporter) ExportSpans(ctx context.Context, _ []sdktrace.Re
 
 func (e *ctxAwareBlockExporter) Shutdown(context.Context) error { return nil }
 
+func TestForceFlush_BalancesPendingFinalizeAfterPartialExportFailure(t *testing.T) {
+	exporter := &failNthExporter{failOn: 1}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(time.Hour),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("flush-pending-balance")
+
+	_, a := tracer.Start(context.Background(), "txn-a",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	_, b := tracer.Start(context.Background(), "txn-b",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	b.End()
+
+	err := processor.ForceFlush(context.Background())
+	require.Error(t, err, "first batch export failure must surface")
+
+	// Second extracted batch must still have been processed (Background fallback)
+	// and pendingFinalize balanced so Shutdown cannot hang.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, tp.Shutdown(ctx), "Shutdown must not block on leaked pendingFinalize")
+
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	require.GreaterOrEqual(t, len(exporter.spans), 1, "remaining batch after failure must still export")
+}
+
+// failNthExporter fails the failOn-th ExportSpans call (1-based), then succeeds.
+type failNthExporter struct {
+	mu     sync.Mutex
+	n      int
+	failOn int
+	spans  sdktracetest.SpanStubs
+}
+
+func (e *failNthExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.n++
+	if e.n == e.failOn {
+		return errors.New("injected export failure")
+	}
+	e.spans = append(e.spans, sdktracetest.SpanStubsFromReadOnlySpans(spans)...)
+	return nil
+}
+
+func (e *failNthExporter) Shutdown(context.Context) error { return nil }
+
 func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

@@ -355,17 +355,27 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 			return nil
 		}
 		p.pendingFinalize += len(batches)
+		var firstErr error
 		for _, spans := range batches {
 			p.mu.Unlock()
-			err := p.acceptCompletedCtx(ctx, spans)
+			// After the first failure (often a flush context deadline), finish
+			// remaining extracted batches with Background so they are not lost
+			// and pendingFinalize stays balanced.
+			exportCtx := ctx
+			if firstErr != nil {
+				exportCtx = context.Background()
+			}
+			err := p.acceptCompletedCtx(exportCtx, spans)
 			p.mu.Lock()
 			p.pendingFinalize--
-			if err != nil {
-				p.idle.Broadcast()
-				return err
+			if err != nil && firstErr == nil {
+				firstErr = err
 			}
 		}
 		p.idle.Broadcast()
+		if firstErr != nil {
+			return firstErr
+		}
 	}
 }
 
