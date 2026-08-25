@@ -84,6 +84,7 @@ type TransactionSpanProcessor struct {
 	harvestDone   chan struct{}
 
 	shutdownOnce sync.Once
+	shutdownErr  error
 	stopped      bool
 	// exporterShutdown is atomic so OnStart/OnEnd/timers (p.mu) and export paths (exportMu) share one flag.
 	exporterShutdown atomic.Bool
@@ -334,7 +335,6 @@ func (p *TransactionSpanProcessor) liveSpanCountLocked() int {
 }
 
 func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
-	var err error
 	p.shutdownOnce.Do(func() {
 		p.mu.Lock()
 		p.stopped = true
@@ -390,12 +390,12 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.exportMu.Lock()
 		p.exporterShutdown.Store(true)
 		if p.exporter != nil {
-			err = p.exporter.Shutdown(ctx)
+			p.shutdownErr = p.exporter.Shutdown(ctx)
 		}
 		p.exportCtx = nil
 		p.exportMu.Unlock()
 	})
-	return err
+	return p.shutdownErr
 }
 
 func (p *TransactionSpanProcessor) waitForIdle(ctx context.Context) {

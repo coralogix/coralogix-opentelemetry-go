@@ -107,6 +107,36 @@ func TestShutdown_WaitsForInFlightSpansBeforeExporterShutdown(t *testing.T) {
 	_ = tp.Shutdown(context.Background())
 }
 
+func TestShutdown_PreservesFirstExporterErrorAcrossCalls(t *testing.T) {
+	exporter := &errShutdownExporter{err: errors.New("exporter shutdown failed")}
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0), WithMaxRegularTraces(0))
+
+	first := processor.Shutdown(context.Background())
+	second := processor.Shutdown(context.Background())
+
+	require.ErrorIs(t, first, exporter.err)
+	require.ErrorIs(t, second, exporter.err)
+	assert.Equal(t, first, second)
+	assert.Equal(t, 1, exporter.calls, "exporter.Shutdown must run once")
+}
+
+type errShutdownExporter struct {
+	mu    sync.Mutex
+	err   error
+	calls int
+}
+
+func (e *errShutdownExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	return nil
+}
+
+func (e *errShutdownExporter) Shutdown(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	return e.err
+}
+
 func TestShutdown_ContextCancelDropsIncompleteLocalTraces(t *testing.T) {
 	exporter := &stickyExporter{}
 	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
