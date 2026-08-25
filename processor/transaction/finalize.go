@@ -19,23 +19,62 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 	_ = p.acceptCompletedCtx(context.Background(), spans)
 }
 
-// acceptCompletedCtx is like acceptCompleted but routes exports through ctx
-// (ForceFlush / Shutdown) so deadlines apply to lock wait and ExportSpans.
+// acceptCompletedCtx publishes transaction identity under p.mu, then finishes
+// metrics/trim/export with ctx (ForceFlush / Shutdown deadlines).
 func (p *TransactionSpanProcessor) acceptCompletedCtx(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if len(spans) == 0 {
 		return nil
 	}
+	p.mu.Lock()
+	named := p.publishCompletedIdentityLocked(spans)
+	p.mu.Unlock()
+	return p.finishCompletedCtx(ctx, named)
+}
 
-	tracked := p.snapshotMembership(spans)
+// publishCompletedIdentityLocked stamps cgx.transaction and publishes
+// finalizedNames while clearing active membership. Caller must hold p.mu so
+// late OnStart cannot observe a still-tracked parent with an empty name.
+func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	tracked := make(map[tracecore.SpanID]spanMembership, len(spans))
+	for _, s := range spans {
+		sid := s.SpanContext().SpanID()
+		if m, ok := p.membership[sid]; ok {
+			tracked[sid] = m
+		}
+	}
 	named := stampTransactionAttributes(spans, tracked)
-	stamped := p.stampSelfDurationAndMetrics(named)
-	// Publish finalized names before any blocking export so late children that
-	// start while ExportSpans runs inherit the stamped transaction identity.
-	p.retainFinalizedNamesAndClear(named)
+	p.retainFinalizedNamesAndClearLocked(named)
+	return named
+}
 
-	// Each local transaction gets its own maxNodes budget and harvest slot.
-	// Rootless leftovers may still arrive as one mixed slice before extract
-	// partitioning; group by stamped name so one txn cannot evict another.
+// publishCompletedBatchesLocked publishes identity for each extracted batch.
+// Caller must hold p.mu.
+func (p *TransactionSpanProcessor) publishCompletedBatchesLocked(batches [][]sdktrace.ReadOnlySpan) [][]sdktrace.ReadOnlySpan {
+	out := make([][]sdktrace.ReadOnlySpan, 0, len(batches))
+	for _, batch := range batches {
+		out = append(out, p.publishCompletedIdentityLocked(batch))
+	}
+	return out
+}
+
+// finishCompletedCtx runs self-duration, trim, and export for spans whose
+// transaction identity was already published.
+func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named []sdktrace.ReadOnlySpan) error {
+	if len(named) == 0 {
+		return nil
+	}
+	stamped := p.stampSelfDurationAndMetrics(named)
+
+	// Drop retained child intervals only after self-duration used them.
+	p.mu.Lock()
+	for _, s := range named {
+		delete(p.childIntervals, s.SpanContext().SpanID())
+	}
+	p.mu.Unlock()
+
 	for _, group := range groupByTransactionName(stamped) {
 		trimmed := selectSlowestSpans(group, p.maxNodes, findTransactionRootSpanIDs(group))
 		if len(trimmed) == 0 {
@@ -157,7 +196,12 @@ func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlyS
 func (p *TransactionSpanProcessor) retainFinalizedNamesAndClear(spans []sdktrace.ReadOnlySpan) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.retainFinalizedNamesAndClearLocked(spans)
+}
 
+// retainFinalizedNamesAndClearLocked publishes finalized txn identity and clears
+// active membership. Caller must hold p.mu.
+func (p *TransactionSpanProcessor) retainFinalizedNamesAndClearLocked(spans []sdktrace.ReadOnlySpan) {
 	// Resolve the local transaction root identity before clearing membership.
 	txnRoot := tracecore.SpanID{}
 	for _, s := range spans {
@@ -177,7 +221,6 @@ func (p *TransactionSpanProcessor) retainFinalizedNamesAndClear(spans []sdktrace
 
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
-		delete(p.childIntervals, sid)
 		delete(p.membership, sid)
 		if name := transactionAttr(s); name != "" {
 			rootID := txnRoot
@@ -264,11 +307,12 @@ func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.Tr
 		if len(cur.spans) == 0 {
 			delete(p.traces, traceID)
 		}
+		batches = p.publishCompletedBatchesLocked(batches)
 		p.pendingFinalize += len(batches)
 		p.mu.Unlock()
 
 		for _, batch := range batches {
-			p.acceptCompleted(batch)
+			_ = p.finishCompletedCtx(context.Background(), batch)
 			p.mu.Lock()
 			p.pendingFinalize--
 			p.idle.Broadcast()
@@ -310,11 +354,12 @@ func (p *TransactionSpanProcessor) scheduleNestedCompletionLocked(traceID tracec
 		if cur.liveCount() > 0 {
 			batches = p.extractCompletedLocalTransactionsLocked(cur, false)
 		}
+		batches = p.publishCompletedBatchesLocked(batches)
 		p.pendingFinalize += len(batches)
 		p.mu.Unlock()
 
 		for _, batch := range batches {
-			p.acceptCompleted(batch)
+			_ = p.finishCompletedCtx(context.Background(), batch)
 			p.mu.Lock()
 			p.pendingFinalize--
 			p.idle.Broadcast()
@@ -356,16 +401,12 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 		}
 		p.pendingFinalize += len(batches)
 		var firstErr error
+		batches = p.publishCompletedBatchesLocked(batches)
 		for _, spans := range batches {
 			p.mu.Unlock()
-			// After the first failure (often a flush context deadline), finish
-			// remaining extracted batches with Background so they are not lost
-			// and pendingFinalize stays balanced.
-			exportCtx := ctx
-			if firstErr != nil {
-				exportCtx = context.Background()
-			}
-			err := p.acceptCompletedCtx(exportCtx, spans)
+			// Keep the flush context for every batch so ForceFlush(ctx) can still
+			// cancel later exports; always decrement pendingFinalize.
+			err := p.finishCompletedCtx(ctx, spans)
 			p.mu.Lock()
 			p.pendingFinalize--
 			if err != nil && firstErr == nil {

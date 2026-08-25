@@ -693,8 +693,8 @@ func TestForceFlush_BalancesPendingFinalizeAfterPartialExportFailure(t *testing.
 	err := processor.ForceFlush(context.Background())
 	require.Error(t, err, "first batch export failure must surface")
 
-	// Second extracted batch must still have been processed (Background fallback)
-	// and pendingFinalize balanced so Shutdown cannot hang.
+	// Second extracted batch keeps the same flush context; with Background that
+	// still exports. pendingFinalize must be balanced either way.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, tp.Shutdown(ctx), "Shutdown must not block on leaked pendingFinalize")
@@ -702,6 +702,37 @@ func TestForceFlush_BalancesPendingFinalizeAfterPartialExportFailure(t *testing.
 	exporter.mu.Lock()
 	defer exporter.mu.Unlock()
 	require.GreaterOrEqual(t, len(exporter.spans), 1, "remaining batch after failure must still export")
+}
+
+func TestForceFlush_KeepsFlushContextOnRemainingBatches(t *testing.T) {
+	exporter := &failNthExporter{failOn: 1}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(time.Hour),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	tracer := tp.Tracer("flush-keep-ctx")
+
+	_, a := tracer.Start(context.Background(), "txn-a",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	_, b := tracer.Start(context.Background(), "txn-b",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	b.End()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already expired before drain
+	err := processor.ForceFlush(ctx)
+	require.Error(t, err)
+
+	// Even when remaining batches also fail under the same cancelled context,
+	// pendingFinalize must not leak.
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutCancel()
+	require.NoError(t, tp.Shutdown(shutCtx))
 }
 
 // failNthExporter fails the failOn-th ExportSpans call (1-based), then succeeds.
@@ -712,7 +743,10 @@ type failNthExporter struct {
 	spans  sdktracetest.SpanStubs
 }
 
-func (e *failNthExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+func (e *failNthExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.n++

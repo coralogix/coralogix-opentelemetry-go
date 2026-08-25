@@ -331,6 +331,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		batches = p.scheduleCompletionLocked(traceID, tb)
 	}
 
+	batches = p.publishCompletedBatchesLocked(batches)
 	p.pendingFinalize += len(batches)
 	if p.totalLiveLocked() == 0 {
 		p.idle.Broadcast()
@@ -338,7 +339,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	p.mu.Unlock()
 
 	for _, batch := range batches {
-		p.acceptCompleted(batch)
+		_ = p.finishCompletedCtx(context.Background(), batch)
 		p.mu.Lock()
 		p.pendingFinalize--
 		p.idle.Broadcast()
@@ -408,9 +409,10 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 			delete(p.traces, id)
 		}
 		p.pendingFinalize += len(leftover)
+		leftover = p.publishCompletedBatchesLocked(leftover)
 		for _, batch := range leftover {
 			p.mu.Unlock()
-			if err := p.acceptCompletedCtx(exportCtx, batch); err != nil && p.shutdownErr == nil {
+			if err := p.finishCompletedCtx(exportCtx, batch); err != nil && p.shutdownErr == nil {
 				p.shutdownErr = err
 			}
 			p.mu.Lock()
