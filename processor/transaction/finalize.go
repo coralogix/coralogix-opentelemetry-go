@@ -29,11 +29,39 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 
 	stamped := p.stampSelfDurationAndMetrics(named)
 
-	trimmed := selectSlowestSpans(stamped, p.maxNodes, findTransactionRootSpanIDs(stamped))
-	if len(trimmed) == 0 {
-		return
+	// Each local transaction gets its own maxNodes budget and harvest slot.
+	// Rootless leftovers may still arrive as one mixed slice before extract
+	// partitioning; group by stamped name so one txn cannot evict another.
+	for _, group := range groupByTransactionName(stamped) {
+		trimmed := selectSlowestSpans(group, p.maxNodes, findTransactionRootSpanIDs(group))
+		if len(trimmed) == 0 {
+			continue
+		}
+		p.exportOrHarvest(trimmed)
 	}
+}
 
+func groupByTransactionName(spans []sdktrace.ReadOnlySpan) [][]sdktrace.ReadOnlySpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	groups := make(map[string][]sdktrace.ReadOnlySpan)
+	var order []string
+	for _, s := range spans {
+		name := transactionAttr(s)
+		if _, seen := groups[name]; !seen {
+			order = append(order, name)
+		}
+		groups[name] = append(groups[name], s)
+	}
+	out := make([][]sdktrace.ReadOnlySpan, 0, len(order))
+	for _, key := range order {
+		out = append(out, groups[key])
+	}
+	return out
+}
+
+func (p *TransactionSpanProcessor) exportOrHarvest(trimmed []sdktrace.ReadOnlySpan) {
 	if p.maxRegularTraces <= 0 || p.harvestPeriod <= 0 {
 		p.exportSpans(trimmed)
 		return
@@ -226,7 +254,7 @@ func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.Tr
 // scheduleNestedCompletionLocked delays nested extract while an outer ancestor
 // is still live so late fire-and-forget children under the nested root can join.
 func (p *TransactionSpanProcessor) scheduleNestedCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {
-	if !hasExtractableNestedTransaction(tb) {
+	if !p.hasExtractableWhileOuterLive(tb) {
 		p.stopNestedCompleteTimerLocked(tb)
 		return nil
 	}

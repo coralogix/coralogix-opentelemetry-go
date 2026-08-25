@@ -168,6 +168,89 @@ func TestIntegration_OuterEndsBeforeNestedStillSeparateTxns(t *testing.T) {
 	assertAttribute(t, outerRoot.Attributes, sampler.TransactionIdentifier, "outer")
 }
 
+func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("late-rootless-while-outer")
+
+	outerCtx, outer := tracer.Start(context.Background(), "outer",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	nestedCtx, nested := tracer.Start(outerCtx, "nested",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	nested.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 1)
+	assertAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier, "nested")
+	exporter.Reset()
+
+	// Fire-and-forget child of the already-finalized nested root while outer
+	// is still live must not stay buffered until outer ends.
+	_, late := tracer.Start(nestedCtx, "late-nested-child",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	late.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	lateSpans := exporter.GetSpans()
+	require.Len(t, lateSpans, 1, "late child of finalized nested must export while outer is live")
+	assertAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifier, "nested")
+	assertNoAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifierRoot)
+	exporter.Reset()
+
+	outer.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	outerSpans := exporter.GetSpans()
+	require.Len(t, outerSpans, 1)
+	assertAttribute(t, outerSpans[0].Attributes, sampler.TransactionIdentifier, "outer")
+}
+
+func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+		WithMaxNodes(1),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("rootless-trim-partitions")
+
+	outerCtx, outer := tracer.Start(context.Background(), "gateway",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	aCtx, a := tracer.Start(outerCtx, "txn-a",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	bCtx, b := tracer.Start(outerCtx, "txn-b",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	b.End()
+	outer.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Len(t, exporter.GetSpans(), 3)
+	exporter.Reset()
+
+	_, lateA := tracer.Start(aCtx, "late-a",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, lateB := tracer.Start(bCtx, "late-b",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	lateA.End()
+	lateB.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2, "each rootless partition must keep its own maxNodes=1 span")
+	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
+	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
+}
+
 func assertAttribute(t *testing.T, attrs []attribute.KeyValue, key, expected string) {
 	t.Helper()
 	for _, a := range attrs {
