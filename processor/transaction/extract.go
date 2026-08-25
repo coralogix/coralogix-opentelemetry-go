@@ -194,7 +194,7 @@ func (p *TransactionSpanProcessor) extractRootlessFinalizedGroupsLocked(tb *trac
 		if isTransactionRoot(s) {
 			continue
 		}
-		m, ok := p.membership[s.SpanContext().SpanID()]
+		m, ok := p.membership[spanRefFromContext(s.SpanContext())]
 		if !ok || m.inheritedName == "" {
 			continue
 		}
@@ -216,7 +216,7 @@ func (p *TransactionSpanProcessor) extractRootlessFinalizedGroupsLocked(tb *trac
 		// Hold while any live span belongs to the same inherited transaction
 		// (descendant, sibling, or still-live parent), ignoring unrelated outer.
 		for liveID := range tb.liveParents {
-			if m, ok := p.membership[liveID]; ok && membershipPartitionKey(m) == key {
+			if m, ok := p.membership[spanRefOf(tb.id, liveID)]; ok && membershipPartitionKey(m) == key {
 				liveRelated = true
 				break
 			}
@@ -257,7 +257,7 @@ func (p *TransactionSpanProcessor) extractRootlessFinalizedGroupsLocked(tb *trac
 // partition identity (inheritedFrom, else inheritedName). Preserves first-seen order.
 func partitionByInheritedName(
 	spans []sdktrace.ReadOnlySpan,
-	tracked map[tracecore.SpanID]spanMembership,
+	tracked map[spanRef]spanMembership,
 ) [][]sdktrace.ReadOnlySpan {
 	if len(spans) == 0 {
 		return nil
@@ -267,7 +267,7 @@ func partitionByInheritedName(
 	for _, s := range spans {
 		key := ""
 		if tracked != nil {
-			if m, ok := tracked[s.SpanContext().SpanID()]; ok {
+			if m, ok := tracked[spanRefFromContext(s.SpanContext())]; ok {
 				key = membershipPartitionKey(m)
 			}
 		}
@@ -334,7 +334,7 @@ func (p *TransactionSpanProcessor) hasExtractableRootlessFinalized(tb *traceBuff
 		if isTransactionRoot(s) {
 			continue
 		}
-		m, ok := p.membership[s.SpanContext().SpanID()]
+		m, ok := p.membership[spanRefFromContext(s.SpanContext())]
 		if !ok || m.inheritedName == "" {
 			continue
 		}
@@ -348,7 +348,7 @@ func (p *TransactionSpanProcessor) hasExtractableRootlessFinalized(tb *traceBuff
 		}
 		liveRelated := false
 		for liveID := range tb.liveParents {
-			if lm, ok := p.membership[liveID]; ok && membershipPartitionKey(lm) == key {
+			if lm, ok := p.membership[spanRefOf(tb.id, liveID)]; ok && membershipPartitionKey(lm) == key {
 				liveRelated = true
 				break
 			}

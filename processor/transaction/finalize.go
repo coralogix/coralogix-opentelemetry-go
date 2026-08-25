@@ -38,11 +38,11 @@ func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktra
 	if len(spans) == 0 {
 		return nil
 	}
-	tracked := make(map[tracecore.SpanID]spanMembership, len(spans))
+	tracked := make(map[spanRef]spanMembership, len(spans))
 	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		if m, ok := p.membership[sid]; ok {
-			tracked[sid] = m
+		ref := spanRefFromContext(s.SpanContext())
+		if m, ok := p.membership[ref]; ok {
+			tracked[ref] = m
 		}
 	}
 	named := stampTransactionAttributes(spans, tracked)
@@ -71,7 +71,7 @@ func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named
 	// Drop retained child intervals only after self-duration used them.
 	p.mu.Lock()
 	for _, s := range named {
-		delete(p.childIntervals, s.SpanContext().SpanID())
+		delete(p.childIntervals, spanRefFromContext(s.SpanContext()))
 	}
 	p.mu.Unlock()
 
@@ -135,11 +135,11 @@ func (p *TransactionSpanProcessor) stampSelfDurationAndMetrics(spans []sdktrace.
 	byParent := childrenByParentSpanID(spans)
 
 	p.mu.Lock()
-	prior := make(map[tracecore.SpanID][]interval, len(spans))
+	prior := make(map[spanRef][]interval, len(spans))
 	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		if ivs := p.childIntervals[sid]; len(ivs) > 0 {
-			prior[sid] = append([]interval(nil), ivs...)
+		ref := spanRefFromContext(s.SpanContext())
+		if ivs := p.childIntervals[ref]; len(ivs) > 0 {
+			prior[ref] = append([]interval(nil), ivs...)
 		}
 	}
 	p.mu.Unlock()
@@ -147,8 +147,9 @@ func (p *TransactionSpanProcessor) stampSelfDurationAndMetrics(spans []sdktrace.
 	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
 	for _, s := range spans {
 		sid := s.SpanContext().SpanID()
+		ref := spanRefFromContext(s.SpanContext())
 		children := byParent[sid]
-		extra := filterPriorIntervals(prior[sid], children)
+		extra := filterPriorIntervals(prior[ref], children)
 		selfDurationNs := selfDurationNanosWithExtraIntervals(s, children, extra)
 		stamped := withSelfDuration(s, selfDurationNs)
 		out = append(out, stamped)
@@ -177,17 +178,17 @@ func filterPriorIntervals(prior []interval, children []sdktrace.ReadOnlySpan) []
 	return out
 }
 
-func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlySpan) map[tracecore.SpanID]spanMembership {
+func (p *TransactionSpanProcessor) snapshotMembership(spans []sdktrace.ReadOnlySpan) map[spanRef]spanMembership {
 	if len(spans) == 0 {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[tracecore.SpanID]spanMembership, len(spans))
+	out := make(map[spanRef]spanMembership, len(spans))
 	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		if m, ok := p.membership[sid]; ok {
-			out[sid] = m
+		ref := spanRefFromContext(s.SpanContext())
+		if m, ok := p.membership[ref]; ok {
+			out[ref] = m
 		}
 	}
 	return out
@@ -212,7 +213,7 @@ func (p *TransactionSpanProcessor) retainFinalizedNamesAndClearLocked(spans []sd
 	}
 	if !txnRoot.IsValid() {
 		for _, s := range spans {
-			if m, ok := p.membership[s.SpanContext().SpanID()]; ok && m.inheritedFrom.IsValid() {
+			if m, ok := p.membership[spanRefFromContext(s.SpanContext())]; ok && m.inheritedFrom.IsValid() {
 				txnRoot = m.inheritedFrom
 				break
 			}
@@ -220,31 +221,31 @@ func (p *TransactionSpanProcessor) retainFinalizedNamesAndClearLocked(spans []sd
 	}
 
 	for _, s := range spans {
-		sid := s.SpanContext().SpanID()
-		delete(p.membership, sid)
+		ref := spanRefFromContext(s.SpanContext())
+		delete(p.membership, ref)
 		if name := transactionAttr(s); name != "" {
 			rootID := txnRoot
 			if !rootID.IsValid() {
-				rootID = sid
+				rootID = ref.span
 			}
-			p.putFinalizedNameLocked(sid, name, rootID)
+			p.putFinalizedNameLocked(ref, name, rootID)
 		}
 	}
 }
 
-// putFinalizedNameLocked inserts or updates a finalized SpanID→txn entry and
+// putFinalizedNameLocked inserts or updates a finalized spanRef→txn entry and
 // evicts the oldest entries when over maxFinalizedNames. Caller must hold p.mu.
-func (p *TransactionSpanProcessor) putFinalizedNameLocked(id tracecore.SpanID, name string, rootID tracecore.SpanID) {
+func (p *TransactionSpanProcessor) putFinalizedNameLocked(ref spanRef, name string, rootID tracecore.SpanID) {
 	if name == "" {
 		return
 	}
 	entry := finalizedTxn{name: name, rootID: rootID}
-	if _, exists := p.finalizedNames[id]; exists {
-		p.finalizedNames[id] = entry
+	if _, exists := p.finalizedNames[ref]; exists {
+		p.finalizedNames[ref] = entry
 		return
 	}
-	p.finalizedNames[id] = entry
-	p.finalizedOrder = append(p.finalizedOrder, id)
+	p.finalizedNames[ref] = entry
+	p.finalizedOrder = append(p.finalizedOrder, ref)
 	for len(p.finalizedNames) > p.maxFinalizedNames {
 		oldest := p.finalizedOrder[0]
 		p.finalizedOrder = p.finalizedOrder[1:]

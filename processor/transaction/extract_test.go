@@ -48,6 +48,7 @@ func TestExtractCompleted_RootsDeepestFirstExcludesExtracted(t *testing.T) {
 
 	processor := NewTransactionSpanProcessor(nil, WithMaxRegularTraces(0), WithCompletionHoldback(0))
 	tb := &traceBuffer{
+		id:          tracecore.TraceID{0xde, 0xef},
 		spans:       []sdktrace.ReadOnlySpan{outer, nested, child},
 		liveParents: map[tracecore.SpanID]tracecore.SpanID{},
 	}

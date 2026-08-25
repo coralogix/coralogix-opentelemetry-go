@@ -58,6 +58,21 @@ type spanMembership struct {
 	finalized bool
 }
 
+// spanRef uniquely identifies a span across traces. SpanIDs are only unique
+// within a TraceID, so processor-wide maps must include both.
+type spanRef struct {
+	trace tracecore.TraceID
+	span  tracecore.SpanID
+}
+
+func spanRefFromContext(sc tracecore.SpanContext) spanRef {
+	return spanRef{trace: sc.TraceID(), span: sc.SpanID()}
+}
+
+func spanRefOf(traceID tracecore.TraceID, spanID tracecore.SpanID) spanRef {
+	return spanRef{trace: traceID, span: spanID}
+}
+
 // finalizedTxn is a post-export lookup entry: display name plus the local
 // transaction root identity used for rootless partitioning.
 type finalizedTxn struct {
@@ -66,6 +81,7 @@ type finalizedTxn struct {
 }
 
 type traceBuffer struct {
+	id                  tracecore.TraceID
 	spans               []sdktrace.ReadOnlySpan
 	liveParents         map[tracecore.SpanID]tracecore.SpanID
 	completeTimer       *time.Timer
@@ -83,14 +99,14 @@ type TransactionSpanProcessor struct {
 
 	mu             sync.Mutex
 	traces         map[tracecore.TraceID]*traceBuffer
-	membership     map[tracecore.SpanID]spanMembership
-	childIntervals map[tracecore.SpanID][]interval
+	membership     map[spanRef]spanMembership
+	childIntervals map[spanRef][]interval
 
 	// finalizedNames retains stamped txn names + root identity after active
 	// membership is cleared so late children can inherit. finalizedOrder is
 	// FIFO insertion order for eviction when over maxFinalizedNames.
-	finalizedNames    map[tracecore.SpanID]finalizedTxn
-	finalizedOrder    []tracecore.SpanID
+	finalizedNames    map[spanRef]finalizedTxn
+	finalizedOrder    []spanRef
 	maxFinalizedNames int
 
 	selfDurationHistogram syncfloat64.Histogram
@@ -196,9 +212,9 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 	p := &TransactionSpanProcessor{
 		exporter:           exporter,
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
-		membership:         make(map[tracecore.SpanID]spanMembership),
-		childIntervals:     make(map[tracecore.SpanID][]interval),
-		finalizedNames:     make(map[tracecore.SpanID]finalizedTxn),
+		membership:         make(map[spanRef]spanMembership),
+		childIntervals:     make(map[spanRef][]interval),
+		finalizedNames:     make(map[spanRef]finalizedTxn),
 		maxNodes:           maxNodes,
 		maxRegularTraces:   maxRegularTraces,
 		harvestPeriod:      harvestPeriod,
@@ -266,6 +282,7 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 			return
 		}
 		tb = &traceBuffer{
+			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
 		}
 		p.traces[traceID] = tb
@@ -302,17 +319,19 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 			return
 		}
 		tb = &traceBuffer{
+			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
 		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
-		p.membership[s.SpanContext().SpanID()] = spanMembership{}
+		p.membership[spanRefFromContext(s.SpanContext())] = spanMembership{}
 	}
 
 	// Only retain intervals for parents we track locally. Remote / external
 	// parent IDs are never cleaned by acceptCompleted and would leak.
 	if parent := s.Parent(); parent.IsValid() && isLocalParent(parent.SpanID(), tb) {
-		p.childIntervals[parent.SpanID()] = append(p.childIntervals[parent.SpanID()], interval{
+		pref := spanRefOf(traceID, parent.SpanID())
+		p.childIntervals[pref] = append(p.childIntervals[pref], interval{
 			start: s.StartTime().UnixNano(),
 			end:   s.EndTime().UnixNano(),
 		})
@@ -428,9 +447,9 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		}
 
 		p.mu.Lock()
-		p.childIntervals = make(map[tracecore.SpanID][]interval)
-		p.membership = make(map[tracecore.SpanID]spanMembership)
-		p.finalizedNames = make(map[tracecore.SpanID]finalizedTxn)
+		p.childIntervals = make(map[spanRef][]interval)
+		p.membership = make(map[spanRef]spanMembership)
+		p.finalizedNames = make(map[spanRef]finalizedTxn)
 		p.finalizedOrder = nil
 		p.mu.Unlock()
 

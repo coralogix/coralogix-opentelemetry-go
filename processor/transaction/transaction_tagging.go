@@ -21,7 +21,7 @@ import (
 // with a different name) are recorded in membership. Sampler echoes that copy
 // the early span name into cgx.transaction are not treated as overrides, so
 // UpdateName can still supply the final transaction name.
-func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]finalizedTxn) {
+func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[spanRef]spanMembership, finalized map[spanRef]finalizedTxn) {
 	parent := s.Parent()
 	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked, finalized)
 
@@ -56,7 +56,7 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 	}
 
 	if tracked != nil {
-		tracked[s.SpanContext().SpanID()] = spanMembership{
+		tracked[spanRefFromContext(s.SpanContext())] = spanMembership{
 			inheritedName: inheritedName,
 			inheritedFrom: inheritedFrom,
 			startName:     startName,
@@ -80,14 +80,14 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 // transaction tree. Prefers the OnStart side table (attrs are not stamped on
 // inherit children until finalize), then finalized-name cache, then live
 // parent attrs / tracestate.
-func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[tracecore.SpanID]spanMembership, finalized map[tracecore.SpanID]finalizedTxn) bool {
+func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, tracked map[spanRef]spanMembership, finalized map[spanRef]finalizedTxn) bool {
 	if parent.IsValid() && tracked != nil {
-		if _, ok := tracked[parent.SpanID()]; ok {
+		if _, ok := tracked[spanRefFromContext(parent)]; ok {
 			return true
 		}
 	}
 	if parent.IsValid() && finalized != nil {
-		if _, ok := finalized[parent.SpanID()]; ok {
+		if _, ok := finalized[spanRefFromContext(parent)]; ok {
 			return true
 		}
 	}
@@ -102,11 +102,11 @@ func hasLocalTransaction(ctx context.Context, parent tracecore.SpanContext, trac
 func resolveParentInfo(
 	ctx context.Context,
 	parent tracecore.SpanContext,
-	tracked map[tracecore.SpanID]spanMembership,
-	finalized map[tracecore.SpanID]finalizedTxn,
+	tracked map[spanRef]spanMembership,
+	finalized map[spanRef]finalizedTxn,
 ) (name string, hasTxn bool, hasLocalRoot bool, inheritedFrom tracecore.SpanID) {
 	if parent.IsValid() && tracked != nil {
-		if m, ok := tracked[parent.SpanID()]; ok {
+		if m, ok := tracked[spanRefFromContext(parent)]; ok {
 			from := m.inheritedFrom
 			if !from.IsValid() {
 				from = parent.SpanID()
@@ -118,7 +118,7 @@ func resolveParentInfo(
 		}
 	}
 	if parent.IsValid() && finalized != nil {
-		if entry, ok := finalized[parent.SpanID()]; ok {
+		if entry, ok := finalized[spanRefFromContext(parent)]; ok {
 			from := entry.rootID
 			if !from.IsValid() {
 				from = parent.SpanID()
@@ -147,7 +147,7 @@ func resolveParentInfo(
 				sc := rw.SpanContext()
 				local := tracked != nil && sc.IsValid()
 				if local {
-					_, local = tracked[sc.SpanID()]
+					_, local = tracked[spanRefFromContext(sc)]
 				}
 				from := tracecore.SpanID{}
 				if sc.IsValid() {
@@ -159,7 +159,7 @@ func resolveParentInfo(
 				sc := rw.SpanContext()
 				local := tracked != nil && sc.IsValid()
 				if local {
-					_, local = tracked[sc.SpanID()]
+					_, local = tracked[spanRefFromContext(sc)]
 				}
 				from := tracecore.SpanID{}
 				if sc.IsValid() {
@@ -202,7 +202,7 @@ func membershipPartitionKey(m spanMembership) string {
 // local batch from the root's final Name() (or a pre-set override attribute).
 func stampTransactionAttributes(
 	spans []sdktrace.ReadOnlySpan,
-	tracked map[tracecore.SpanID]spanMembership,
+	tracked map[spanRef]spanMembership,
 ) []sdktrace.ReadOnlySpan {
 	if len(spans) == 0 {
 		return spans
@@ -227,7 +227,7 @@ func stampTransactionAttributes(
 		key := ""
 		name := ""
 		if tracked != nil {
-			if m, ok := tracked[s.SpanContext().SpanID()]; ok {
+			if m, ok := tracked[spanRefFromContext(s.SpanContext())]; ok {
 				key = membershipPartitionKey(m)
 				name = m.inheritedName
 			}
@@ -264,14 +264,14 @@ func stampTransactionAttributes(
 // Name(). Sampler-injected cgx.transaction that merely echoed the OnStart name
 // is ignored so UpdateName can win. StartNewTransaction sets
 // cgx.transaction.explicit so equal-name overrides still win after a rename.
-func resolveTransactionName(root sdktrace.ReadOnlySpan, tracked map[tracecore.SpanID]spanMembership) string {
+func resolveTransactionName(root sdktrace.ReadOnlySpan, tracked map[spanRef]spanMembership) string {
 	if hasExplicitTransactionOverride(root) {
 		if v := transactionAttr(root); v != "" {
 			return v
 		}
 	}
 	if tracked != nil {
-		if m, ok := tracked[root.SpanContext().SpanID()]; ok {
+		if m, ok := tracked[spanRefFromContext(root.SpanContext())]; ok {
 			if m.overrideName != "" {
 				return m.overrideName
 			}

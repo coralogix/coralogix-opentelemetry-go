@@ -667,6 +667,74 @@ func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t 
 	assertNoAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
 }
 
+// reuseRootSpanIDGen assigns the same SpanID to every new root across TraceIDs.
+// Child SpanIDs within a trace still vary.
+type reuseRootSpanIDGen struct {
+	traces uint64
+	spans  uint64
+}
+
+func (g *reuseRootSpanIDGen) NewIDs(_ context.Context) (tracecore.TraceID, tracecore.SpanID) {
+	g.traces++
+	var tid tracecore.TraceID
+	tid[7] = byte(g.traces)
+	return tid, tracecore.SpanID{0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa}
+}
+
+func (g *reuseRootSpanIDGen) NewSpanID(_ context.Context, _ tracecore.TraceID) tracecore.SpanID {
+	g.spans++
+	var sid tracecore.SpanID
+	sid[7] = byte(g.spans)
+	return sid
+}
+
+func TestTagTransaction_SpanIDReuseAcrossTracesKeepsSeparateMembership(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(processor),
+		sdktrace.WithIDGenerator(&reuseRootSpanIDGen{}),
+	)
+	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
+	tracer := tp.Tracer("spanid-reuse")
+
+	aCtx, a := tracer.Start(context.Background(), "txn-a",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	a.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Equal(t, a.SpanContext().SpanID(), tracecore.SpanID{0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa})
+
+	bCtx, b := tracer.Start(context.Background(), "txn-b",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	b.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+	require.Equal(t, a.SpanContext().SpanID(), b.SpanContext().SpanID())
+	require.NotEqual(t, a.SpanContext().TraceID(), b.SpanContext().TraceID())
+	exporter.Reset()
+
+	// Late children must inherit from their own TraceID's finalized root, not
+	// the other trace that reused the same SpanID.
+	_, lateA := tracer.Start(aCtx, "late-a",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	_, lateB := tracer.Start(bCtx, "late-b",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	lateA.End()
+	lateB.End()
+	require.NoError(t, processor.ForceFlush(context.Background()))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
+	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
+}
+
 func findSpan(t *testing.T, spans []sdktracetest.SpanStub, name string) *sdktracetest.SpanStub {
 	t.Helper()
 	for i := range spans {
