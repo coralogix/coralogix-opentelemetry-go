@@ -16,8 +16,14 @@ import (
 // stamp cgx.transaction from the root's final name (or override), stamp
 // exclusive self-duration + metrics, trim, then harvest or export.
 func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan) {
+	_ = p.acceptCompletedCtx(context.Background(), spans)
+}
+
+// acceptCompletedCtx is like acceptCompleted but routes exports through ctx
+// (ForceFlush / Shutdown) so deadlines apply to lock wait and ExportSpans.
+func (p *TransactionSpanProcessor) acceptCompletedCtx(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if len(spans) == 0 {
-		return
+		return nil
 	}
 
 	tracked := p.snapshotMembership(spans)
@@ -35,8 +41,11 @@ func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan
 		if len(trimmed) == 0 {
 			continue
 		}
-		p.exportOrHarvest(trimmed)
+		if err := p.exportOrHarvest(ctx, trimmed); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func groupByTransactionName(spans []sdktrace.ReadOnlySpan) [][]sdktrace.ReadOnlySpan {
@@ -59,18 +68,16 @@ func groupByTransactionName(spans []sdktrace.ReadOnlySpan) [][]sdktrace.ReadOnly
 	return out
 }
 
-func (p *TransactionSpanProcessor) exportOrHarvest(trimmed []sdktrace.ReadOnlySpan) {
+func (p *TransactionSpanProcessor) exportOrHarvest(ctx context.Context, trimmed []sdktrace.ReadOnlySpan) error {
 	if p.maxRegularTraces <= 0 || p.harvestPeriod <= 0 {
-		p.exportSpans(trimmed)
-		return
+		return p.exportSpansCtx(ctx, trimmed)
 	}
 
 	p.mu.Lock()
 	stopped := p.stopped || p.exporterShutdown.Load()
 	p.mu.Unlock()
 	if stopped {
-		p.exportSpans(trimmed)
-		return
+		return p.exportSpansCtx(ctx, trimmed)
 	}
 
 	p.harvestMu.Lock()
@@ -80,8 +87,9 @@ func (p *TransactionSpanProcessor) exportOrHarvest(trimmed []sdktrace.ReadOnlySp
 	})
 	p.harvestMu.Unlock()
 	if len(stubs) > 0 {
-		p.exportSpans(stubs)
+		return p.exportSpansCtx(ctx, stubs)
 	}
+	return nil
 }
 
 func (p *TransactionSpanProcessor) stampSelfDurationAndMetrics(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
@@ -324,7 +332,10 @@ func (p *TransactionSpanProcessor) scheduleNestedCompletionLocked(traceID tracec
 	return nil
 }
 
-func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
+func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
 		var batches [][]sdktrace.ReadOnlySpan
 		for id, tb := range p.traces {
@@ -341,14 +352,18 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked() {
 		}
 		if len(batches) == 0 {
 			p.idle.Broadcast()
-			return
+			return nil
 		}
 		p.pendingFinalize += len(batches)
 		for _, spans := range batches {
 			p.mu.Unlock()
-			p.acceptCompleted(spans)
+			err := p.acceptCompletedCtx(ctx, spans)
 			p.mu.Lock()
 			p.pendingFinalize--
+			if err != nil {
+				p.idle.Broadcast()
+				return err
+			}
 		}
 		p.idle.Broadcast()
 	}
@@ -411,22 +426,35 @@ func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
 }
 
 func (p *TransactionSpanProcessor) exportSpans(spans []sdktrace.ReadOnlySpan) {
+	_ = p.exportSpansCtx(context.Background(), spans)
+}
+
+// exportSpansCtx exports with ctx for lock wait and ExportSpans. When ctx is
+// Background, falls back to p.exportCtx if Shutdown published one.
+func (p *TransactionSpanProcessor) exportSpansCtx(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if p.exporter == nil || len(spans) == 0 {
-		return
+		return nil
 	}
-	// Only exportMu — never p.mu (Shutdown may hold p.mu waiting pendingFinalize).
-	p.exportMu.Lock()
-	defer p.exportMu.Unlock()
-	if p.exporterShutdown.Load() {
-		return
-	}
-	ctx := p.exportCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := p.exporter.ExportSpans(ctx, spans); err != nil {
-		otel.Handle(err)
+	// Only exportMu — never p.mu (Shutdown may hold p.mu waiting pendingFinalize).
+	if err := p.lockExportMu(ctx); err != nil {
+		return err
 	}
+	defer p.exportMu.Unlock()
+	if p.exporterShutdown.Load() {
+		return nil
+	}
+	exportCtx := ctx
+	if p.exportCtx != nil && (ctx == nil || ctx == context.Background()) {
+		exportCtx = p.exportCtx
+	}
+	if err := p.exporter.ExportSpans(exportCtx, spans); err != nil {
+		otel.Handle(err)
+		return err
+	}
+	return nil
 }
 
 func (p *TransactionSpanProcessor) recordSelfDurationMetric(span sdktrace.ReadOnlySpan, selfDurationNs int64) {

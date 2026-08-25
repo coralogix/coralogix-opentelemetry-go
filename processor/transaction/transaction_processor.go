@@ -389,7 +389,9 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.waitForIdle(ctx)
 
 		p.mu.Lock()
-		p.flushPendingCompletionsLocked()
+		if err := p.flushPendingCompletionsLocked(exportCtx); err != nil && p.shutdownErr == nil {
+			p.shutdownErr = err
+		}
 		for p.pendingFinalize > 0 {
 			p.idle.Wait()
 		}
@@ -408,7 +410,9 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.pendingFinalize += len(leftover)
 		for _, batch := range leftover {
 			p.mu.Unlock()
-			p.acceptCompleted(batch)
+			if err := p.acceptCompletedCtx(exportCtx, batch); err != nil && p.shutdownErr == nil {
+				p.shutdownErr = err
+			}
 			p.mu.Lock()
 			p.pendingFinalize--
 		}
@@ -471,14 +475,18 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 
 	// Do not publish ctx onto p.exportCtx: concurrent OnEnd/acceptCompleted
 	// exports must keep using Background (or Shutdown's drain context), not a
-	// ForceFlush deadline that may expire mid-export.
+	// ForceFlush deadline that may expire mid-export. Flush-triggered drains
+	// pass ctx explicitly into acceptCompletedCtx instead.
 
 	p.mu.Lock()
 	if p.exporterShutdown.Load() {
 		p.mu.Unlock()
 		return nil
 	}
-	p.flushPendingCompletionsLocked()
+	if err := p.flushPendingCompletionsLocked(ctx); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	if err := p.waitPendingFinalizeLocked(ctx); err != nil {
 		p.mu.Unlock()
 		return err

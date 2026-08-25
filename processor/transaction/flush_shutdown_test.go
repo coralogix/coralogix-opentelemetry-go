@@ -12,6 +12,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	sdktracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracecore "go.opentelemetry.io/otel/trace"
+
+	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
 func TestForceFlush_DoesNotFinalizeIncompleteTraces(t *testing.T) {
@@ -613,10 +615,62 @@ func TestForceFlush_DoesNotPublishContextToConcurrentExports(t *testing.T) {
 	defer exporter.mu.Unlock()
 	require.NotEmpty(t, exporter.ctxs)
 	for _, c := range exporter.ctxs {
-		assert.NoError(t, c.Err(), "acceptCompleted export must not use ForceFlush context")
+		assert.NoError(t, c.Err(), "OnEnd acceptCompleted export must not use ForceFlush context")
 	}
 	_ = tp.Shutdown(context.Background())
 }
+
+func TestForceFlush_DrainExportsHonorFlushContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	exporter := &ctxAwareBlockExporter{started: started, release: release}
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxRegularTraces(0),
+		WithCompletionHoldback(time.Hour),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	defer func() {
+		close(release)
+		_ = tp.Shutdown(context.Background())
+	}()
+	tracer := tp.Tracer("flush-ctx-drain")
+
+	_, root := tracer.Start(context.Background(), "root",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+	)
+	root.End()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	err := processor.ForceFlush(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	select {
+	case <-started:
+	default:
+		t.Fatal("ForceFlush drain never reached ExportSpans")
+	}
+}
+
+// ctxAwareBlockExporter blocks until release or ctx cancellation.
+type ctxAwareBlockExporter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (e *ctxAwareBlockExporter) ExportSpans(ctx context.Context, _ []sdktrace.ReadOnlySpan) error {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *ctxAwareBlockExporter) Shutdown(context.Context) error { return nil }
 
 func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 	started := make(chan struct{})
@@ -669,7 +723,7 @@ func TestAcceptCompleted_PublishesFinalizedNameBeforeExport(t *testing.T) {
 	exporter := &gatedStickyExporter{started: started, release: release}
 	processor := NewTransactionSpanProcessor(exporter,
 		WithMaxRegularTraces(0),
-		WithCompletionHoldback(0),
+		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
@@ -679,16 +733,16 @@ func TestAcceptCompleted_PublishesFinalizedNameBeforeExport(t *testing.T) {
 		tracecore.WithSpanKind(tracecore.SpanKindServer),
 	)
 	root.SetName("GET /orders")
+	root.End()
 
-	ended := make(chan struct{})
+	flushDone := make(chan error, 1)
 	go func() {
-		root.End()
-		close(ended)
+		flushDone <- processor.ForceFlush(context.Background())
 	}()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
-		t.Fatal("root export did not reach ExportSpans")
+		t.Fatal("ForceFlush did not reach ExportSpans")
 	}
 
 	// While root export is blocked, a late child must already see the stamped name.
@@ -698,11 +752,7 @@ func TestAcceptCompleted_PublishesFinalizedNameBeforeExport(t *testing.T) {
 	late.End()
 
 	close(release)
-	select {
-	case <-ended:
-	case <-time.After(2 * time.Second):
-		t.Fatal("root.End did not return after export release")
-	}
+	require.NoError(t, <-flushDone)
 	require.NoError(t, processor.ForceFlush(context.Background()))
 
 	spans := exporter.get()
