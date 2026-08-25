@@ -170,6 +170,35 @@ func TestSelectSlowestSpans_ProtectsAllTransactionRoots(t *testing.T) {
 	assert.NotContains(t, ids, tracecore.SpanID{3}, "non-root loses when roots fill maxNodes")
 }
 
+func TestSelectSlowestSpans_PreservesExternalParentOnKeptRoot(t *testing.T) {
+	base := time.Unix(0, 0)
+	remoteParent := tracecore.NewSpanContext(tracecore.SpanContextConfig{
+		TraceID: tracecore.TraceID{0x01},
+		SpanID:  tracecore.SpanID{0xff},
+		Remote:  true,
+	})
+	root := newFakeSpanWithParent(1, remoteParent, base, base.Add(200*time.Millisecond))
+	auth := newFakeSpanWithParent(2, spanCtx(1), base, base.Add(5*time.Millisecond))
+	cache := newFakeSpanWithParent(3, spanCtx(1), base, base.Add(2*time.Millisecond))
+	db := newFakeSpanWithParent(4, spanCtx(1), base, base.Add(40*time.Millisecond))
+	http := newFakeSpanWithParent(5, spanCtx(1), base, base.Add(80*time.Millisecond))
+	render := newFakeSpanWithParent(6, spanCtx(1), base, base.Add(10*time.Millisecond))
+	spans := []sdktrace.ReadOnlySpan{root, auth, cache, db, http, render}
+
+	out := selectSlowestSpans(spans, 3, []tracecore.SpanID{spanCtx(1).SpanID()})
+
+	var keptRoot sdktrace.ReadOnlySpan
+	for _, s := range out {
+		if s.SpanContext().SpanID() == (tracecore.SpanID{1}) {
+			keptRoot = s
+		}
+	}
+	require.NotNil(t, keptRoot)
+	assert.Equal(t, remoteParent.SpanID(), keptRoot.Parent().SpanID(),
+		"trimmed export must keep the external parent link")
+	assert.True(t, keptRoot.Parent().IsValid())
+}
+
 func spanIDSet(spans []sdktrace.ReadOnlySpan) map[tracecore.SpanID]struct{} {
 	out := make(map[tracecore.SpanID]struct{}, len(spans))
 	for _, s := range spans {

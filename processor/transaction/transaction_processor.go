@@ -41,6 +41,12 @@ type spanMembership struct {
 	// inheritedName is set when the parent transaction name comes only from
 	// TraceState / attrs without a locally tracked root (finalize fallback).
 	inheritedName string
+	// startName is the span name observed at OnStart (before UpdateName).
+	startName string
+	// overrideName is an explicit transaction name that must win over the
+	// final span name (Express route template / StartNewTransaction). Sampler
+	// echoes of the early span name are not overrides.
+	overrideName string
 }
 
 type traceBuffer struct {

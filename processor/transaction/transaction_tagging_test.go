@@ -167,6 +167,47 @@ func TestTagTransaction_UsesFinalSpanNameAfterUpdateName(t *testing.T) {
 	assertNoAttribute(t, childStub.Attributes, sampler.TransactionIdentifierRoot)
 }
 
+func TestTagTransaction_SamplerEchoDoesNotBlockUpdateName(t *testing.T) {
+	exporter, tracer, shutdown := newTracerProvider(t)
+	defer shutdown()
+
+	// Sampler injects cgx.transaction from the sampling-time name. That echo
+	// must not freeze the transaction name before Express-style UpdateName.
+	ctx, root := tracer.Start(context.Background(), "GET",
+		tracecore.WithSpanKind(tracecore.SpanKindServer),
+		tracecore.WithAttributes(
+			attribute.String(sampler.TransactionIdentifier, "GET"),
+		),
+	)
+	_, child := tracer.Start(ctx, "handler")
+	root.SetName("GET /myroute")
+	child.End()
+	root.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	rootStub := findSpan(t, spans, "GET /myroute")
+	childStub := findSpan(t, spans, "handler")
+	assertAttribute(t, rootStub.Attributes, sampler.TransactionIdentifier, "GET /myroute")
+	assertAttribute(t, childStub.Attributes, sampler.TransactionIdentifier, "GET /myroute")
+}
+
+func TestTagTransaction_StartNewTransactionDifferentNameWins(t *testing.T) {
+	exporter, tracer, shutdown := newTracerProvider(t)
+	defer shutdown()
+
+	_, span := tracer.Start(context.Background(), "process",
+		tracecore.WithSpanKind(tracecore.SpanKindInternal),
+	)
+	sampler.StartNewTransaction(span, "fulfill")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "fulfill")
+	assertBoolAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot, true)
+}
+
 func TestTagTransaction_InheritsFromParentTraceStateWhenParentHasNoAttributes(t *testing.T) {
 	exporter, tracer, shutdown := newTracerProvider(t)
 	defer shutdown()

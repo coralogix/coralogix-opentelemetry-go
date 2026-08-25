@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	sdktracetest "go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracecore "go.opentelemetry.io/otel/trace"
@@ -106,4 +107,38 @@ func TestChildrenByParentSpanID(t *testing.T) {
 	assert.Len(t, byParent[parentSpanID], 2)
 	assert.Len(t, byParent[child1SpanID], 1)
 	assert.Len(t, byParent[tracecore.SpanID{3}], 0)
+}
+
+func TestWithSelfDuration_ReplacesExistingAttribute(t *testing.T) {
+	base := time.Unix(0, 0)
+	stub := sdktracetest.SpanStub{
+		SpanContext: tracecore.NewSpanContext(tracecore.SpanContextConfig{
+			TraceID: tracecore.TraceID{0x01},
+			SpanID:  tracecore.SpanID{1},
+		}),
+		StartTime: base,
+		EndTime:   base.Add(100 * time.Millisecond),
+		Attributes: []attribute.KeyValue{
+			attribute.Float64(SelfDurationAttribute, 9.99),
+			attribute.String("other", "keep"),
+		},
+	}
+	wrapped := withSelfDuration(stub.Snapshot(), 40_000_000)
+
+	attrs := wrapped.Attributes()
+	var selfCount int
+	var selfVal float64
+	var other string
+	for _, a := range attrs {
+		switch string(a.Key) {
+		case SelfDurationAttribute:
+			selfCount++
+			selfVal = a.Value.AsFloat64()
+		case "other":
+			other = a.Value.AsString()
+		}
+	}
+	assert.Equal(t, 1, selfCount, "must not duplicate self_duration keys")
+	assert.InDelta(t, 0.04, selfVal, 1e-12)
+	assert.Equal(t, "keep", other)
 }

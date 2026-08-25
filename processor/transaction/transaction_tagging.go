@@ -17,8 +17,10 @@ import (
 // Express-style UpdateName (or similar) may still change the root name before
 // End. Final names are stamped in stampTransactionAttributes at finalize.
 //
-// Pre-set cgx.transaction (sampler template / StartNewTransaction) is left on
-// the span and treated as an override at finalize.
+// Explicit overrides (route template ≠ start name, or later StartNewTransaction
+// with a different name) are recorded in membership. Sampler echoes that copy
+// the early span name into cgx.transaction are not treated as overrides, so
+// UpdateName can still supply the final transaction name.
 func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map[tracecore.SpanID]spanMembership) {
 	parent := s.Parent()
 	hasLocalTxn := hasLocalTransaction(ctx, parent, tracked)
@@ -36,8 +38,20 @@ func beginTransaction(ctx context.Context, s sdktrace.ReadWriteSpan, tracked map
 		}
 	}
 
+	startName := s.Name()
+	overrideName := ""
+	if starts {
+		if existing := readWriteTransactionAttr(s); existing != "" && existing != startName {
+			overrideName = existing
+		}
+	}
+
 	if tracked != nil {
-		tracked[s.SpanContext().SpanID()] = spanMembership{inheritedName: inheritedName}
+		tracked[s.SpanContext().SpanID()] = spanMembership{
+			inheritedName: inheritedName,
+			startName:     startName,
+			overrideName:  overrideName,
+		}
 	}
 
 	if !starts {
@@ -130,7 +144,7 @@ func stampTransactionAttributes(
 	root := findTransactionRootSpan(spans)
 	var name string
 	if root != nil {
-		name = resolveTransactionName(root)
+		name = resolveTransactionName(root, tracked)
 	} else {
 		// Leftover flush without ROOT markers: prefer TraceState-inherited name.
 		for _, s := range spans {
@@ -149,7 +163,7 @@ func stampTransactionAttributes(
 					break
 				}
 			}
-			name = resolveTransactionName(fallback)
+			name = resolveTransactionName(fallback, tracked)
 		}
 	}
 
@@ -160,14 +174,34 @@ func stampTransactionAttributes(
 	return out
 }
 
-func resolveTransactionName(root sdktrace.ReadOnlySpan) string {
-	if v := transactionAttr(root); v != "" {
-		return v
+// resolveTransactionName prefers an explicit override over the root's final
+// Name(). Sampler-injected cgx.transaction that merely echoed the OnStart name
+// is ignored so UpdateName can win (JS/Java preserve intentional templates via
+// attr≠start-name; StartNewTransaction after start is attr≠startName).
+func resolveTransactionName(root sdktrace.ReadOnlySpan, tracked map[tracecore.SpanID]spanMembership) string {
+	if tracked != nil {
+		if m, ok := tracked[root.SpanContext().SpanID()]; ok {
+			if m.overrideName != "" {
+				return m.overrideName
+			}
+			if v := transactionAttr(root); v != "" && v != m.startName {
+				return v
+			}
+		}
 	}
 	return root.Name()
 }
 
 func transactionAttr(span sdktrace.ReadOnlySpan) string {
+	for _, a := range span.Attributes() {
+		if a.Key == attribute.Key(sampler.TransactionIdentifier) {
+			return a.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func readWriteTransactionAttr(span sdktrace.ReadWriteSpan) string {
 	for _, a := range span.Attributes() {
 		if a.Key == attribute.Key(sampler.TransactionIdentifier) {
 			return a.Value.AsString()

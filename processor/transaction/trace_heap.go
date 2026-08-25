@@ -144,7 +144,8 @@ func nearestKeptParent(span sdktrace.ReadOnlySpan, byID map[tracecore.SpanID]sdk
 		}
 		ancestor, exists := byID[parent.SpanID()]
 		if !exists {
-			break
+			// Parent is outside this local batch (e.g. remote). Preserve it.
+			return parent
 		}
 		parent = ancestor.Parent()
 	}
