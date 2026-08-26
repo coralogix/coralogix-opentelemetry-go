@@ -10,6 +10,9 @@ import (
 const (
 	TransactionIdentifier                      = "cgx.transaction"
 	TransactionIdentifierRoot                  = "cgx.transaction.root"
+	// TransactionIdentifierExplicit marks an application StartNewTransaction
+	// override so the processor can distinguish it from sampler-injected names.
+	TransactionIdentifierExplicit              = "cgx.transaction.explicit"
 	TransactionIdentifierTraceState            = "cgx_transaction"
 	DistributedTransactionIdentifier           = "cgx.transaction.distributed"
 	DistributedTransactionIdentifierTraceState = "cgx_transaction_distributed"
@@ -116,7 +119,10 @@ func (s *CoralogixSampler) getParentSpanContext(ctx context.Context) traceCore.S
 	return traceCore.SpanContext{}
 }
 func StartNewTransaction(span traceCore.Span, flow string) traceCore.Span {
-	span.SetAttributes(attribute.String(TransactionIdentifier, flow))
-	span.SetAttributes(attribute.Bool(TransactionIdentifierRoot, true))
+	span.SetAttributes(
+		attribute.String(TransactionIdentifier, flow),
+		attribute.Bool(TransactionIdentifierRoot, true),
+		attribute.Bool(TransactionIdentifierExplicit, true),
+	)
 	return span
 }
