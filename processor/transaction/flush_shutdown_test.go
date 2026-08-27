@@ -18,7 +18,7 @@ import (
 
 func TestForceFlush_DoesNotFinalizeIncompleteTraces(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	tracer := tp.Tracer("force-flush-test")
 	base := time.Unix(0, 0)
@@ -111,7 +111,7 @@ func TestShutdown_WaitsForInFlightSpansBeforeExporterShutdown(t *testing.T) {
 
 func TestShutdown_PreservesFirstExporterErrorAcrossCalls(t *testing.T) {
 	exporter := &errShutdownExporter{err: errors.New("exporter shutdown failed")}
-	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0), WithMaxRegularTraces(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
 	first := processor.Shutdown(context.Background())
 	second := processor.Shutdown(context.Background())
@@ -195,7 +195,7 @@ func TestShutdown_ContextCancelSkipsEndedParentsWithLiveChildren(t *testing.T) {
 
 func TestShutdown_PostStopChildPreventsPrematureParentFinalize(t *testing.T) {
 	exporter := &stickyExporter{}
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	tracer := tp.Tracer("shutdown-post-stop-child")
 	base := time.Unix(0, 0)
@@ -250,7 +250,7 @@ func TestShutdown_WaitsForPendingFinalizeAfterContextCancel(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	exporter := &blockingExporter{started: started, release: release}
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	tracer := tp.Tracer("shutdown-pending-finalize")
 
@@ -287,7 +287,6 @@ func TestShutdown_WaitsForPendingFinalizeAfterContextCancel(t *testing.T) {
 func TestCompletionHoldback_JoinsFireAndForgetChild(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(50*time.Millisecond),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -337,7 +336,6 @@ func (e *ctxCaptureExporter) Shutdown(context.Context) error { return nil }
 func TestShutdown_CancelledContextUsesBackgroundForDrainExports(t *testing.T) {
 	exporter := &ctxCaptureExporter{}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -371,7 +369,6 @@ func TestShutdown_CancelledContextUsesBackgroundForDrainExports(t *testing.T) {
 func TestShutdown_CancelledContextStillDrainsIdleHoldback(t *testing.T) {
 	exporter := &stickyExporter{}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -400,7 +397,6 @@ func TestCompletionHoldback_StaleTimerDoesNotFinalizeEarly(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	holdback := 40 * time.Millisecond
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(holdback),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -473,7 +469,7 @@ func (e *gatedStickyExporter) get() sdktracetest.SpanStubs {
 func TestExporterShutdown_AtomicVisibleAcrossMuAndExportMu(t *testing.T) {
 	// Race check: exporterShutdown is atomic.Bool shared across p.mu and exportMu.
 	exporter := &stickyExporter{}
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	tracer := tp.Tracer("exporter-shutdown-atomic")
 	base := time.Unix(0, 0)
@@ -514,7 +510,6 @@ func TestForceFlush_ReturnsWhenContextExpiresDuringPendingFinalize(t *testing.T)
 	release := make(chan struct{})
 	exporter := &gatedStickyExporter{started: started, release: release}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -548,52 +543,9 @@ func TestForceFlush_ReturnsWhenContextExpiresDuringPendingFinalize(t *testing.T)
 	_ = tp.Shutdown(context.Background())
 }
 
-func TestForceFlush_ReturnsWhenContextExpiresWaitingForExportMu(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	exporter := &gatedStickyExporter{started: started, release: release}
-	// Harvest holds the completed trace until ForceFlush; first flush blocks in
-	// flushHarvest's ExportSpans (exportMu held, pendingFinalize already 0).
-	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(1),
-		WithHarvestPeriod(time.Hour),
-		WithCompletionHoldback(0),
-	)
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := tp.Tracer("flush-export-mu-timeout")
-	base := time.Unix(0, 0)
-
-	_, span := tracer.Start(context.Background(), "held",
-		tracecore.WithSpanKind(tracecore.SpanKindServer),
-		tracecore.WithTimestamp(base),
-	)
-	span.End(tracecore.WithTimestamp(base.Add(50 * time.Millisecond)))
-
-	flush1 := make(chan error, 1)
-	go func() {
-		flush1 <- processor.ForceFlush(context.Background())
-	}()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first ForceFlush did not reach ExportSpans via harvest")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	err := processor.ForceFlush(ctx)
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-
-	close(release)
-	require.NoError(t, <-flush1)
-	_ = tp.Shutdown(context.Background())
-}
-
 func TestForceFlush_DoesNotPublishContextToConcurrentExports(t *testing.T) {
 	exporter := &ctxCaptureExporter{}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -625,7 +577,6 @@ func TestForceFlush_DrainExportsHonorFlushContext(t *testing.T) {
 	release := make(chan struct{})
 	exporter := &ctxAwareBlockExporter{started: started, release: release}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -675,7 +626,6 @@ func (e *ctxAwareBlockExporter) Shutdown(context.Context) error { return nil }
 func TestForceFlush_BalancesPendingFinalizeAfterPartialExportFailure(t *testing.T) {
 	exporter := &failNthExporter{failOn: 1}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -707,7 +657,6 @@ func TestForceFlush_BalancesPendingFinalizeAfterPartialExportFailure(t *testing.
 func TestForceFlush_KeepsFlushContextOnRemainingBatches(t *testing.T) {
 	exporter := &failNthExporter{failOn: 1}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -764,7 +713,6 @@ func TestForceFlush_RescansIdleAfterAccept(t *testing.T) {
 	release := make(chan struct{})
 	exporter := &gatedStickyExporter{started: started, release: release}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -809,7 +757,6 @@ func TestAcceptCompleted_PublishesFinalizedNameBeforeExport(t *testing.T) {
 	release := make(chan struct{})
 	exporter := &gatedStickyExporter{started: started, release: release}
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(time.Hour),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))

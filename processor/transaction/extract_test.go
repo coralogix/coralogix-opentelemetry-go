@@ -46,7 +46,7 @@ func TestExtractCompleted_RootsDeepestFirstExcludesExtracted(t *testing.T) {
 	nested := fakeRootSpan("inner", 2, 1, base.Add(10*time.Millisecond), base.Add(60*time.Millisecond), true)
 	child := fakeRootSpan("db", 3, 2, base.Add(20*time.Millisecond), base.Add(50*time.Millisecond), false)
 
-	processor := NewTransactionSpanProcessor(nil, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(nil, WithCompletionHoldback(0))
 	tb := &traceBuffer{
 		id:          tracecore.TraceID{0xde, 0xef},
 		spans:       []sdktrace.ReadOnlySpan{outer, nested, child},

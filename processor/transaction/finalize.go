@@ -14,7 +14,7 @@ import (
 
 // acceptCompleted finalizes one completed local-transaction batch:
 // stamp cgx.transaction from the root's final name (or override), stamp
-// exclusive self-duration + metrics, trim, then harvest or export.
+// exclusive self-duration + metrics, trim, then export.
 func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan) {
 	_ = p.acceptCompletedCtx(context.Background(), spans)
 }
@@ -80,7 +80,7 @@ func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named
 		if len(trimmed) == 0 {
 			continue
 		}
-		if err := p.exportOrHarvest(ctx, trimmed); err != nil {
+		if err := p.exportSpansCtx(ctx, trimmed); err != nil {
 			return err
 		}
 	}
@@ -105,30 +105,6 @@ func groupByTransactionName(spans []sdktrace.ReadOnlySpan) [][]sdktrace.ReadOnly
 		out = append(out, groups[key])
 	}
 	return out
-}
-
-func (p *TransactionSpanProcessor) exportOrHarvest(ctx context.Context, trimmed []sdktrace.ReadOnlySpan) error {
-	if p.maxRegularTraces <= 0 || p.harvestPeriod <= 0 {
-		return p.exportSpansCtx(ctx, trimmed)
-	}
-
-	p.mu.Lock()
-	stopped := p.stopped || p.exporterShutdown.Load()
-	p.mu.Unlock()
-	if stopped {
-		return p.exportSpansCtx(ctx, trimmed)
-	}
-
-	p.harvestMu.Lock()
-	stubs := p.harvest.witness(harvestTrace{
-		durationNs: rootDurationNanos(trimmed),
-		spans:      trimmed,
-	})
-	p.harvestMu.Unlock()
-	if len(stubs) > 0 {
-		return p.exportSpansCtx(ctx, stubs)
-	}
-	return nil
 }
 
 func (p *TransactionSpanProcessor) stampSelfDurationAndMetrics(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
@@ -437,44 +413,6 @@ func (p *TransactionSpanProcessor) lockExportMu(ctx context.Context) error {
 			time.Sleep(time.Millisecond)
 		}
 	}
-}
-
-func (p *TransactionSpanProcessor) flushHarvest(ctx context.Context) error {
-	// Hold exportMu across drain+export so Shutdown cannot shut down between them.
-	if err := p.lockExportMu(ctx); err != nil {
-		return err
-	}
-	defer p.exportMu.Unlock()
-	if p.exporterShutdown.Load() {
-		return nil
-	}
-	p.harvestMu.Lock()
-	winners := p.harvest.drain()
-	p.harvestMu.Unlock()
-
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	for i, w := range winners {
-		if p.exporter == nil || len(w.spans) == 0 {
-			continue
-		}
-		if err := p.exporter.ExportSpans(ctx, w.spans); err != nil {
-			otel.Handle(err)
-			// Put the failed winner and any not-yet-exported traces back so a
-			// later ForceFlush can retry (drain permanently removes them).
-			p.harvestMu.Lock()
-			stubs := p.harvest.restore(winners[i:])
-			p.harvestMu.Unlock()
-			if len(stubs) > 0 && p.exporter != nil {
-				if stubErr := p.exporter.ExportSpans(ctx, stubs); stubErr != nil {
-					otel.Handle(stubErr)
-				}
-			}
-			return err
-		}
-	}
-	return nil
 }
 
 func (p *TransactionSpanProcessor) exportSpans(spans []sdktrace.ReadOnlySpan) {
