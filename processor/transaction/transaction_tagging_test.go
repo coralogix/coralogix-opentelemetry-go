@@ -18,7 +18,7 @@ import (
 func newTracerProvider(t *testing.T) (*sdktracetest.InMemoryExporter, tracecore.Tracer, func()) {
 	t.Helper()
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	tracer := tp.Tracer("transaction-tagging-test")
 	return exporter, tracer, func() { require.NoError(t, tp.Shutdown(context.Background())) }
@@ -231,7 +231,6 @@ func TestTagTransaction_StartNewTransactionDifferentNameWins(t *testing.T) {
 func TestTagTransaction_LeftoverLateChildrenKeepOwnInheritedNames(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -278,7 +277,6 @@ func TestTagTransaction_LeftoverLateChildrenKeepOwnInheritedNames(t *testing.T) 
 func TestTagTransaction_LateChildInheritsFinalizedParentName(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -311,7 +309,6 @@ func TestTagTransaction_LateChildInheritsFinalizedParentName(t *testing.T) {
 func TestTagTransaction_LateChildInheritsProcessorOnlyFinalizedName(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -345,7 +342,6 @@ func TestTagTransaction_LateChildInheritsProcessorOnlyFinalizedName(t *testing.T
 func TestTagTransaction_LateChildFromFinalizedNonRootInheritsName(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -383,7 +379,6 @@ func TestTagTransaction_LateChildFromFinalizedNonRootInheritsName(t *testing.T) 
 func TestTagTransaction_LateGrandchildKeepsInheritedName(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -422,7 +417,6 @@ func TestTagTransaction_LateGrandchildKeepsInheritedName(t *testing.T) {
 func TestTagTransaction_LateGrandchildWaitsForLiveParent(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -465,7 +459,6 @@ func TestTagTransaction_LateGrandchildWaitsForLiveParent(t *testing.T) {
 func TestTagTransaction_SamplerRootClearedOnInherit(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(
@@ -502,7 +495,6 @@ func TestTagTransaction_SamplerRootClearedOnInherit(t *testing.T) {
 func TestTagTransaction_SameNameFinalizedRootsPartitionSeparately(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 		WithMaxNodes(1),
 	)
@@ -545,7 +537,6 @@ func TestTagTransaction_SameNameFinalizedRootsPartitionSeparately(t *testing.T) 
 func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 		WithMaxNodes(1),
 	)
@@ -588,7 +579,6 @@ func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
 func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 		WithMaxFinalizedNames(2),
 	)
@@ -691,7 +681,6 @@ func (g *reuseRootSpanIDGen) NewSpanID(_ context.Context, _ tracecore.TraceID) t
 func TestTagTransaction_SpanIDReuseAcrossTracesKeepsSeparateMembership(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 	)
 	tp := sdktrace.NewTracerProvider(

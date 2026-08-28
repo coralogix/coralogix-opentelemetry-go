@@ -9,7 +9,7 @@
 //   - OnEnd / holdback: buffer until local transaction trees complete.
 //   - acceptCompleted (export finalize): stamp cgx.transaction from the root's
 //     final Name() (or pre-set override), stamp self-duration + metrics, trim
-//     to maxNodes, then harvest or export.
+//     to maxNodes, then export.
 package transaction
 
 import (
@@ -93,7 +93,7 @@ func (tb *traceBuffer) liveCount() int {
 }
 
 // TransactionSpanProcessor wraps a SpanExporter to tag Coralogix transactions,
-// stamp cgx.transaction.self_duration, trim, and harvest slowest local traces.
+// stamp cgx.transaction.self_duration, trim, and export completed local traces.
 type TransactionSpanProcessor struct {
 	exporter sdktrace.SpanExporter
 
@@ -112,15 +112,7 @@ type TransactionSpanProcessor struct {
 	selfDurationHistogram syncfloat64.Histogram
 
 	maxNodes           int
-	maxRegularTraces   int
-	harvestPeriod      time.Duration
 	completionHoldback time.Duration
-
-	harvestMu     sync.Mutex
-	harvest       *regularTraceHeap
-	harvestTicker *time.Ticker
-	harvestStopCh chan struct{}
-	harvestDone   chan struct{}
 
 	shutdownOnce sync.Once
 	shutdownErr  error
@@ -157,24 +149,6 @@ func WithMaxNodes(maxNodes int) Option {
 	}
 }
 
-// WithMaxRegularTraces caps completed traces held until harvest.
-// Default 1 keeps only the slowest completed local waterfall(s) per harvest
-// window; losers are stub-exported (root only). Self-duration metrics are still
-// recorded for every completed local trace. 0 exports every completed trimmed
-// trace immediately.
-func WithMaxRegularTraces(maxRegularTraces int) Option {
-	return func(p *TransactionSpanProcessor) {
-		p.maxRegularTraces = maxRegularTraces
-	}
-}
-
-// WithHarvestPeriod sets how often the harvest heap is flushed.
-func WithHarvestPeriod(period time.Duration) Option {
-	return func(p *TransactionSpanProcessor) {
-		p.harvestPeriod = period
-	}
-}
-
 // WithCompletionHoldback sets the post-idle delay before finalizing a local trace.
 func WithCompletionHoldback(d time.Duration) Option {
 	return func(p *TransactionSpanProcessor) {
@@ -208,7 +182,7 @@ func newSelfDurationHistogram(meterProvider metric.MeterProvider) syncfloat64.Hi
 // NewTransactionSpanProcessor builds a processor. Options override env vars;
 // unset options fall back to OTEL_CX_TRANSACTION_* then package defaults.
 func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option) *TransactionSpanProcessor {
-	maxNodes, maxRegularTraces, harvestPeriod, completionHoldback := defaultsFromEnv()
+	maxNodes, completionHoldback := defaultsFromEnv()
 	p := &TransactionSpanProcessor{
 		exporter:           exporter,
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
@@ -216,8 +190,6 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 		childIntervals:     make(map[spanRef][]interval),
 		finalizedNames:     make(map[spanRef]finalizedTxn),
 		maxNodes:           maxNodes,
-		maxRegularTraces:   maxRegularTraces,
-		harvestPeriod:      harvestPeriod,
 		completionHoldback: completionHoldback,
 	}
 	p.idle = sync.NewCond(&p.mu)
@@ -230,37 +202,7 @@ func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option)
 	if p.selfDurationHistogram == nil {
 		p.selfDurationHistogram = newSelfDurationHistogram(global.MeterProvider())
 	}
-	p.harvest = newRegularTraceHeap(p.maxRegularTraces)
-	if p.maxRegularTraces > 0 && p.harvestPeriod > 0 {
-		p.startHarvester()
-	}
 	return p
-}
-
-func (p *TransactionSpanProcessor) startHarvester() {
-	p.harvestTicker = time.NewTicker(p.harvestPeriod)
-	p.harvestStopCh = make(chan struct{})
-	p.harvestDone = make(chan struct{})
-	go func() {
-		defer close(p.harvestDone)
-		for {
-			select {
-			case <-p.harvestTicker.C:
-				_ = p.flushHarvest(context.Background())
-			case <-p.harvestStopCh:
-				return
-			}
-		}
-	}()
-}
-
-func (p *TransactionSpanProcessor) stopHarvester() {
-	if p.harvestTicker == nil {
-		return
-	}
-	p.harvestTicker.Stop()
-	close(p.harvestStopCh)
-	<-p.harvestDone
 }
 
 // OnStart decides new vs inherit and marks roots. Transaction names are stamped
@@ -404,8 +346,6 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 		p.exportCtx = exportCtx
 		p.exportMu.Unlock()
 
-		p.stopHarvester()
-
 		p.waitForIdle(ctx)
 
 		p.mu.Lock()
@@ -441,10 +381,6 @@ func (p *TransactionSpanProcessor) Shutdown(ctx context.Context) error {
 			p.idle.Wait()
 		}
 		p.mu.Unlock()
-
-		if err := p.flushHarvest(exportCtx); err != nil && p.shutdownErr == nil {
-			p.shutdownErr = err
-		}
 
 		p.mu.Lock()
 		p.childIntervals = make(map[spanRef][]interval)
@@ -496,8 +432,7 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 
 	// Do not publish ctx onto p.exportCtx: concurrent OnEnd/acceptCompleted
 	// exports must keep using Background (or Shutdown's drain context), not a
-	// ForceFlush deadline that may expire mid-export. Flush-triggered drains
-	// pass ctx explicitly into acceptCompletedCtx instead.
+	// ForceFlush deadline that may expire mid-export.
 
 	p.mu.Lock()
 	if p.exporterShutdown.Load() {
@@ -514,9 +449,6 @@ func (p *TransactionSpanProcessor) ForceFlush(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
-	if err := p.flushHarvest(ctx); err != nil {
-		return err
-	}
 	if err := p.lockExportMu(ctx); err != nil {
 		return err
 	}

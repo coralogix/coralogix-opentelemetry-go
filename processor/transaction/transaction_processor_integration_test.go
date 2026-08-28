@@ -17,7 +17,7 @@ import (
 
 func TestIntegration_ProcessorOnly(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(processor),
@@ -66,7 +66,7 @@ func TestIntegration_ProcessorOnly(t *testing.T) {
 
 func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(processor),
@@ -128,7 +128,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 
 func TestIntegration_OuterEndsBeforeNestedStillSeparateTxns(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
@@ -170,7 +170,7 @@ func TestIntegration_OuterEndsBeforeNestedStillSeparateTxns(t *testing.T) {
 
 func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter, WithMaxRegularTraces(0), WithCompletionHoldback(0))
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
 	tracer := tp.Tracer("late-rootless-while-outer")
@@ -211,7 +211,6 @@ func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.
 func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxRegularTraces(0),
 		WithCompletionHoldback(0),
 		WithMaxNodes(1),
 	)
@@ -249,6 +248,57 @@ func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
 	require.Len(t, spans, 2, "each rootless partition must keep its own maxNodes=1 span")
 	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
 	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
+}
+
+func TestIntegration_ExportsEveryCompletedTraceImmediately(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("immediate-export-test")
+
+	_, first := tracer.Start(context.Background(), "first",
+		tracecore.WithSpanKind(tracecore.SpanKindServer))
+	first.End()
+	require.Len(t, exporter.GetSpans(), 1)
+
+	_, second := tracer.Start(context.Background(), "second",
+		tracecore.WithSpanKind(tracecore.SpanKindServer))
+	second.End()
+	require.Len(t, exporter.GetSpans(), 2, "every completed trace must export immediately")
+
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_TrimAppliesBeforeExport(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithMaxNodes(2),
+		WithCompletionHoldback(0),
+	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("trim-test")
+	base := time.Unix(0, 0)
+
+	rootCtx, root := tracer.Start(context.Background(), "root",
+		tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
+	_, fastChild := tracer.Start(rootCtx, "fast-child", tracecore.WithTimestamp(base))
+	fastChild.End(tracecore.WithTimestamp(base.Add(1 * time.Millisecond)))
+	_, slowChild := tracer.Start(rootCtx, "slow-child", tracecore.WithTimestamp(base))
+	slowChild.End(tracecore.WithTimestamp(base.Add(90 * time.Millisecond)))
+	root.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2, "trimmed to maxNodes=2: root + slowest child")
+
+	names := map[string]bool{}
+	for _, s := range spans {
+		names[s.Name] = true
+	}
+	assert.True(t, names["root"], "root must always survive trim")
+	assert.True(t, names["slow-child"], "slowest non-root span must survive trim")
+	assert.False(t, names["fast-child"], "fastest non-root span must be trimmed")
+
+	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
 func assertAttribute(t *testing.T, attrs []attribute.KeyValue, key, expected string) {

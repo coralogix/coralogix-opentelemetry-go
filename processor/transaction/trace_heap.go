@@ -23,7 +23,7 @@ type spanHeapItem struct {
 
 // slowestSpanMinHeap is a min-heap by span duration. Head is the shortest kept
 // span — displace it when a slower candidate appears. container/heap provides
-// sift-up / sift-down (same pattern as regularTraceMinHeap in harvest.go).
+// sift-up / sift-down (same pattern as slowestSpanMinHeap).
 type slowestSpanMinHeap []spanHeapItem
 
 func (h slowestSpanMinHeap) Len() int { return len(h) }
