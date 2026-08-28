@@ -99,6 +99,42 @@ func TestNewTransactionSpanProcessor_FallsBackToGlobalMeterProvider(t *testing.T
 	require.Len(t, dataPoints, 1)
 }
 
+func TestSelfDurationMetrics_OnlyForEligibleBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		spans   int
+		metrics uint64
+	}{
+		{name: "130 spans", spans: 130, metrics: 130},
+		{name: "260 spans", spans: 260, metrics: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := metricsdk.NewManualReader()
+			meterProvider := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+			exporter := sdktracetest.NewInMemoryExporter()
+			processor := NewTransactionSpanProcessor(exporter, WithMeterProvider(meterProvider), WithCompletionHoldback(0))
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+			tracer := tp.Tracer("self-duration-cap-metric-test")
+
+			rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+			for i := 1; i < tc.spans; i++ {
+				_, child := tracer.Start(rootCtx, "child")
+				child.End()
+			}
+			root.End()
+			require.NoError(t, tp.Shutdown(context.Background()))
+
+			rm, err := reader.Collect(context.Background())
+			require.NoError(t, err)
+			var count uint64
+			for _, dp := range findHistogramDataPoints(t, rm, SelfDurationMetricName) {
+				count += dp.Count
+			}
+			assert.Equal(t, tc.metrics, count)
+		})
+	}
+}
+
 func findHistogramDataPoints(t *testing.T, rm metricdata.ResourceMetrics, metricName string) []metricdata.HistogramDataPoint {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {

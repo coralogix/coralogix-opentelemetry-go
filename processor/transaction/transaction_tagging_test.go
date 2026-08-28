@@ -496,7 +496,6 @@ func TestTagTransaction_SameNameFinalizedRootsPartitionSeparately(t *testing.T) 
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
 		WithCompletionHoldback(0),
-		WithMaxNodes(1),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
@@ -538,7 +537,6 @@ func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
 		WithCompletionHoldback(0),
-		WithMaxNodes(1),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
@@ -554,13 +552,12 @@ func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
 	mid.End()
 	root.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	// maxNodes=1 keeps only the root from the first batch; membership names are
-	// still retained for both spans before trim.
+	// Finalized names are retained for both spans after the first batch exports.
 	require.NotEmpty(t, exporter.GetSpans())
 	exporter.Reset()
 
 	// Late children from different spans of the SAME finalized transaction must
-	// share one identity (and thus one maxNodes=1 budget), not two.
+	// share one identity.
 	_, fromRoot := tracer.Start(rootCtx, "late-from-root",
 		tracecore.WithSpanKind(tracecore.SpanKindInternal),
 	)
@@ -572,8 +569,9 @@ func TestTagTransaction_LateChildrenFromSameTxnShareIdentity(t *testing.T) {
 	require.NoError(t, processor.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 1, "same transaction identity must share one maxNodes budget")
-	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "GET /orders")
+	require.Len(t, spans, 2)
+	assertAttribute(t, findSpan(t, spans, "late-from-root").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertAttribute(t, findSpan(t, spans, "late-from-mid").Attributes, sampler.TransactionIdentifier, "GET /orders")
 }
 
 func TestTagTransaction_FinalizedNamesCapEvictsOldest(t *testing.T) {

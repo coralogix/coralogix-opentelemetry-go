@@ -208,15 +208,14 @@ func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.
 	assertAttribute(t, outerSpans[0].Attributes, sampler.TransactionIdentifier, "outer")
 }
 
-func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
+func TestIntegration_RootlessPartitionsExportIndependently(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
 		WithCompletionHoldback(0),
-		WithMaxNodes(1),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
-	tracer := tp.Tracer("rootless-trim-partitions")
+	tracer := tp.Tracer("rootless-export-partitions")
 
 	outerCtx, outer := tracer.Start(context.Background(), "gateway",
 		tracecore.WithSpanKind(tracecore.SpanKindServer),
@@ -245,7 +244,7 @@ func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
 	require.NoError(t, processor.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 2, "each rootless partition must keep its own maxNodes=1 span")
+	require.Len(t, spans, 2, "each rootless partition must export its span")
 	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
 	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
 }
@@ -269,36 +268,58 @@ func TestIntegration_ExportsEveryCompletedTraceImmediately(t *testing.T) {
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
-func TestIntegration_TrimAppliesBeforeExport(t *testing.T) {
-	exporter := sdktracetest.NewInMemoryExporter()
-	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxNodes(2),
-		WithCompletionHoldback(0),
-	)
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := tp.Tracer("trim-test")
-	base := time.Unix(0, 0)
+func TestIntegration_EnrichesOnlyEligibleBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		spans    int
+		enriched bool
+	}{
+		{name: "130 spans", spans: 130, enriched: true},
+		{name: "260 spans", spans: 260, enriched: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exporter := sdktracetest.NewInMemoryExporter()
+			processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+			tracer := tp.Tracer("self-duration-cap-test")
+			base := time.Unix(0, 0)
 
-	rootCtx, root := tracer.Start(context.Background(), "root",
-		tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
-	_, fastChild := tracer.Start(rootCtx, "fast-child", tracecore.WithTimestamp(base))
-	fastChild.End(tracecore.WithTimestamp(base.Add(1 * time.Millisecond)))
-	_, slowChild := tracer.Start(rootCtx, "slow-child", tracecore.WithTimestamp(base))
-	slowChild.End(tracecore.WithTimestamp(base.Add(90 * time.Millisecond)))
-	root.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
+			rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
+			for i := 1; i < tc.spans; i++ {
+				_, child := tracer.Start(rootCtx, "child", tracecore.WithTimestamp(base))
+				child.End(tracecore.WithTimestamp(base.Add(time.Millisecond)))
+				if tc.spans > MaxSelfDurationSpans && i == MaxSelfDurationSpans+1 {
+					require.Len(t, exporter.GetSpans(), MaxSelfDurationSpans+1,
+						"the 257th completed span must flush the raw buffered batch")
+				}
+			}
+			root.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
 
-	spans := exporter.GetSpans()
-	require.Len(t, spans, 2, "trimmed to maxNodes=2: root + slowest child")
-
-	names := map[string]bool{}
-	for _, s := range spans {
-		names[s.Name] = true
+			spans := exporter.GetSpans()
+			require.Len(t, spans, tc.spans, "all spans must export")
+			for _, span := range spans {
+				if tc.enriched {
+					assertHasAttribute(t, span.Attributes, SelfDurationAttribute)
+					assertAttribute(t, span.Attributes, sampler.TransactionIdentifier, "root")
+				} else {
+					assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
+					assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
+					assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifierRoot)
+				}
+			}
+			require.NoError(t, tp.Shutdown(context.Background()))
+		})
 	}
-	assert.True(t, names["root"], "root must always survive trim")
-	assert.True(t, names["slow-child"], "slowest non-root span must survive trim")
-	assert.False(t, names["fast-child"], "fastest non-root span must be trimmed")
+}
 
-	require.NoError(t, tp.Shutdown(context.Background()))
+func assertHasAttribute(t *testing.T, attrs []attribute.KeyValue, key string) {
+	t.Helper()
+	for _, a := range attrs {
+		if string(a.Key) == key {
+			return
+		}
+	}
+	t.Fatalf("attribute %q not found", key)
 }
 
 func assertAttribute(t *testing.T, attrs []attribute.KeyValue, key, expected string) {

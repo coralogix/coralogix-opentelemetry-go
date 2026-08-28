@@ -11,29 +11,23 @@ import (
 )
 
 func TestDefaultsFromEnv_InvalidFallsBack(t *testing.T) {
-	t.Setenv(EnvMaxNodes, "not-a-number")
 	t.Setenv(EnvCompletionHoldbackMillis, "xyz")
 
-	maxNodes, holdback := defaultsFromEnv()
-	assert.Equal(t, DefaultMaxNodes, maxNodes)
+	holdback := defaultsFromEnv()
 	assert.Equal(t, DefaultCompletionHoldback, holdback)
 }
 
 func TestDefaultsFromEnv_NegativeFallsBack(t *testing.T) {
-	t.Setenv(EnvMaxNodes, "-1")
 	t.Setenv(EnvCompletionHoldbackMillis, "-1")
 
-	maxNodes, holdback := defaultsFromEnv()
-	assert.Equal(t, DefaultMaxNodes, maxNodes)
+	holdback := defaultsFromEnv()
 	assert.Equal(t, DefaultCompletionHoldback, holdback)
 }
 
 func TestDefaultsFromEnv_ParsesValues(t *testing.T) {
-	t.Setenv(EnvMaxNodes, "128")
 	t.Setenv(EnvCompletionHoldbackMillis, "250")
 
-	maxNodes, holdback := defaultsFromEnv()
-	assert.Equal(t, 128, maxNodes)
+	holdback := defaultsFromEnv()
 	assert.Equal(t, 250*time.Millisecond, holdback)
 }
 
@@ -41,7 +35,7 @@ func TestDefaultsFromEnv_MillisOverflowFallsBack(t *testing.T) {
 	// math.MaxInt64 ms overflows Duration multiplication to a negative value.
 	t.Setenv(EnvCompletionHoldbackMillis, "9223372036854775807")
 
-	_, holdback := defaultsFromEnv()
+	holdback := defaultsFromEnv()
 	assert.Equal(t, DefaultCompletionHoldback, holdback)
 	assert.True(t, holdback > 0)
 }
@@ -50,7 +44,7 @@ func TestDefaultsFromEnv_MillisJustOverMaxFallsBack(t *testing.T) {
 	over := strconv.FormatInt(maxDurationMillis+1, 10)
 	t.Setenv(EnvCompletionHoldbackMillis, over)
 
-	_, holdback := defaultsFromEnv()
+	holdback := defaultsFromEnv()
 	assert.Equal(t, DefaultCompletionHoldback, holdback)
 }
 
@@ -58,32 +52,27 @@ func TestDefaultsFromEnv_MaxRepresentableMillisAccepted(t *testing.T) {
 	raw := strconv.FormatInt(maxDurationMillis, 10)
 	t.Setenv(EnvCompletionHoldbackMillis, raw)
 
-	_, holdback := defaultsFromEnv()
+	holdback := defaultsFromEnv()
 	assert.Equal(t, time.Duration(maxDurationMillis)*time.Millisecond, holdback)
 	assert.True(t, holdback > 0)
 }
 
 func TestNewTransactionSpanProcessor_OptionsOverrideEnv(t *testing.T) {
-	t.Setenv(EnvMaxNodes, "64")
 	t.Setenv(EnvCompletionHoldbackMillis, "50")
 
 	exporter := sdktracetest.NewInMemoryExporter()
 	p := NewTransactionSpanProcessor(exporter,
-		WithMaxNodes(32),
 		WithCompletionHoldback(10*time.Millisecond),
 	)
 	require.NotNil(t, p)
-	assert.Equal(t, 32, p.maxNodes)
 	assert.Equal(t, 10*time.Millisecond, p.completionHoldback)
 }
 
 func TestNewTransactionSpanProcessor_EnvUsedWhenOptionsUnset(t *testing.T) {
-	t.Setenv(EnvMaxNodes, "64")
 	t.Setenv(EnvCompletionHoldbackMillis, "50")
 
 	exporter := sdktracetest.NewInMemoryExporter()
 	p := NewTransactionSpanProcessor(exporter)
 	require.NotNil(t, p)
-	assert.Equal(t, 64, p.maxNodes)
 	assert.Equal(t, 50*time.Millisecond, p.completionHoldback)
 }

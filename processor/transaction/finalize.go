@@ -12,15 +12,15 @@ import (
 	"github.com/coralogix/coralogix-opentelemetry-go/sampler"
 )
 
-// acceptCompleted finalizes one completed local-transaction batch:
-// stamp cgx.transaction from the root's final name (or override), stamp
-// exclusive self-duration + metrics, trim, then export.
+// acceptCompleted finalizes one completed local-transaction batch. Batches at
+// most MaxSelfDurationSpans receive transaction tagging, self-duration, and
+// metrics. Larger batches normally switch to raw passthrough in OnEnd.
 func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan) {
 	_ = p.acceptCompletedCtx(context.Background(), spans)
 }
 
 // acceptCompletedCtx publishes transaction identity under p.mu, then finishes
-// metrics/trim/export with ctx (ForceFlush / Shutdown deadlines).
+// metrics/export with ctx (ForceFlush / Shutdown deadlines).
 func (p *TransactionSpanProcessor) acceptCompletedCtx(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if len(spans) == 0 {
 		return nil
@@ -31,12 +31,18 @@ func (p *TransactionSpanProcessor) acceptCompletedCtx(ctx context.Context, spans
 	return p.finishCompletedCtx(ctx, named)
 }
 
-// publishCompletedIdentityLocked stamps cgx.transaction and publishes
-// finalizedNames while clearing active membership. Caller must hold p.mu so
-// late OnStart cannot observe a still-tracked parent with an empty name.
+// publishCompletedIdentityLocked enriches an eligible batch and publishes its
+// identity while clearing active membership. Larger batches are exported
+// without processor attributes. Caller must hold p.mu.
 func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
 	if len(spans) == 0 {
 		return nil
+	}
+	if len(spans) > MaxSelfDurationSpans {
+		for _, s := range spans {
+			delete(p.membership, spanRefFromContext(s.SpanContext()))
+		}
+		return withoutTransactionAttributes(spans)
 	}
 	tracked := make(map[spanRef]spanMembership, len(spans))
 	for _, s := range spans {
@@ -60,27 +66,29 @@ func (p *TransactionSpanProcessor) publishCompletedBatchesLocked(batches [][]sdk
 	return out
 }
 
-// finishCompletedCtx runs self-duration, trim, and export for spans whose
-// transaction identity was already published.
+// finishCompletedCtx stamps self-duration and records metrics for an eligible
+// batch, then exports every span whose transaction identity was published.
 func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named []sdktrace.ReadOnlySpan) error {
 	if len(named) == 0 {
 		return nil
 	}
-	stamped := p.stampSelfDurationAndMetrics(named)
+	groups := [][]sdktrace.ReadOnlySpan{named}
+	if len(named) <= MaxSelfDurationSpans {
+		groups = groupByTransactionName(named)
+		for i, group := range groups {
+			groups[i] = p.stampSelfDurationAndMetrics(group)
+		}
+	}
 
-	// Drop retained child intervals only after self-duration used them.
+	// Drop retained child intervals after the stamped prefix has used them.
 	p.mu.Lock()
 	for _, s := range named {
 		delete(p.childIntervals, spanRefFromContext(s.SpanContext()))
 	}
 	p.mu.Unlock()
 
-	for _, group := range groupByTransactionName(stamped) {
-		trimmed := selectSlowestSpans(group, p.maxNodes, findTransactionRootSpanIDs(group))
-		if len(trimmed) == 0 {
-			continue
-		}
-		if err := p.exportSpansCtx(ctx, trimmed); err != nil {
+	for _, group := range groups {
+		if err := p.exportSpansCtx(ctx, group); err != nil {
 			return err
 		}
 	}
@@ -229,20 +237,6 @@ func (p *TransactionSpanProcessor) putFinalizedNameLocked(ref spanRef, name stri
 	}
 }
 
-func findTransactionRootSpanIDs(spans []sdktrace.ReadOnlySpan) []tracecore.SpanID {
-	rootKey := attribute.Key(sampler.TransactionIdentifierRoot)
-	var roots []tracecore.SpanID
-	for _, s := range spans {
-		for _, a := range s.Attributes() {
-			if a.Key == rootKey && a.Value.AsBool() {
-				roots = append(roots, s.SpanContext().SpanID())
-				break
-			}
-		}
-	}
-	return roots
-}
-
 func (p *TransactionSpanProcessor) stopCompleteTimerLocked(tb *traceBuffer) {
 	if tb.completeTimer != nil {
 		tb.completeTimer.Stop()
@@ -255,6 +249,31 @@ func (p *TransactionSpanProcessor) stopNestedCompleteTimerLocked(tb *traceBuffer
 		tb.nestedCompleteTimer.Stop()
 		tb.nestedCompleteTimer = nil
 	}
+}
+
+// schedulePassthroughCleanupLocked retains only the trace marker after a batch
+// crosses MaxSelfDurationSpans, so late spans remain raw passthrough spans.
+// Caller must hold p.mu.
+func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID tracecore.TraceID, tb *traceBuffer) {
+	if tb.liveCount() > 0 {
+		return
+	}
+	p.stopCompleteTimerLocked(tb)
+	if p.completionHoldback <= 0 {
+		delete(p.traces, traceID)
+		return
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(p.completionHoldback, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		cur, ok := p.traces[traceID]
+		if ok && cur == tb && cur.passthrough && cur.liveCount() == 0 && cur.completeTimer == timer {
+			delete(p.traces, traceID)
+			p.idle.Broadcast()
+		}
+	})
+	tb.completeTimer = timer
 }
 
 func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {

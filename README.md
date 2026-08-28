@@ -16,21 +16,21 @@ seconds), and records the matching histogram.
   `UpdateName` later).
 - **Export finalize** (completed local batch): set `cgx.transaction` from the
   root’s **final** `Name()` (or a pre-set / `StartNewTransaction` override) on
-  every span in the batch, then stamp self-duration, trim, and export.
+  every span in the batch, then export every span.
 
-### Trim default
+### Transaction enrichment limit
 
-By default the processor keeps at most **256** slowest spans per completed local
-trace (`WithMaxNodes` / `OTEL_CX_TRANSACTION_MAX_NODES`). Every completed trimmed
-local trace is exported immediately.
+Transactions buffer up to **256** completed spans. When the 257th span ends,
+the processor immediately exports those buffered spans unchanged and proxies
+all later spans unchanged. Transactions that finish at 256 spans or fewer
+receive transaction tags, self-duration, and its metric.
 
 ### Options and env vars
 
-Constructor options win over env. Invalid env values fall back to defaults.
+Invalid env values fall back to defaults.
 
 | Option | Env var | Default | Meaning |
 |--------|---------|---------|---------|
-| `WithMaxNodes` | `OTEL_CX_TRANSACTION_MAX_NODES` | `256` | Max spans kept per completed local trace (slowest first; root always kept) |
 | `WithCompletionHoldback` | `OTEL_CX_TRANSACTION_COMPLETION_HOLDBACK_MILLIS` | `100` | Post-idle delay before finalizing a local trace |
 | `WithMeterProvider` | — | global | MeterProvider for `cgx.transaction.self_duration` |
 

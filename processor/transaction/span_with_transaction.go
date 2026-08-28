@@ -23,6 +23,33 @@ func withTransaction(span sdktrace.ReadOnlySpan, txnName string, isRoot bool) sd
 	}
 }
 
+// withoutTransactionAttributes removes processor transaction attributes from
+// oversized batches. The root marker is set at OnStart, so it must be removed
+// at export time as well.
+func withoutTransactionAttributes(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
+	out := make([]sdktrace.ReadOnlySpan, 0, len(spans))
+	for _, span := range spans {
+		out = append(out, spanWithoutTransactionAttributes{ReadOnlySpan: span})
+	}
+	return out
+}
+
+type spanWithoutTransactionAttributes struct{ sdktrace.ReadOnlySpan }
+
+func (s spanWithoutTransactionAttributes) Attributes() []attribute.KeyValue {
+	original := s.ReadOnlySpan.Attributes()
+	out := make([]attribute.KeyValue, 0, len(original))
+	for _, a := range original {
+		if a.Key == attribute.Key(sampler.TransactionIdentifier) ||
+			a.Key == attribute.Key(sampler.TransactionIdentifierRoot) ||
+			a.Key == attribute.Key(sampler.TransactionIdentifierExplicit) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func (s spanWithTransaction) Attributes() []attribute.KeyValue {
 	original := s.ReadOnlySpan.Attributes()
 	out := make([]attribute.KeyValue, 0, len(original)+2)

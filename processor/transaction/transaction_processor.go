@@ -6,10 +6,10 @@
 //   - OnStart: decide new vs inherit (SERVER / CONSUMER / remote / no local
 //     parent txn). Mark cgx.transaction.root on new roots. Track membership.
 //     Do not freeze cgx.transaction from the early span name.
-//   - OnEnd / holdback: buffer until local transaction trees complete.
-//   - acceptCompleted (export finalize): stamp cgx.transaction from the root's
-//     final Name() (or pre-set override), stamp self-duration + metrics, trim
-//     to maxNodes, then export.
+//   - OnEnd / holdback: buffer until local transaction trees complete, unless
+//     the 257th completed span triggers immediate raw passthrough.
+//   - acceptCompleted (export finalize): batches of at most 256 spans receive
+//     transaction tags, self-duration, and metrics; larger batches export raw.
 package transaction
 
 import (
@@ -84,6 +84,7 @@ type traceBuffer struct {
 	id                  tracecore.TraceID
 	spans               []sdktrace.ReadOnlySpan
 	liveParents         map[tracecore.SpanID]tracecore.SpanID
+	passthrough         bool
 	completeTimer       *time.Timer
 	nestedCompleteTimer *time.Timer
 }
@@ -92,8 +93,8 @@ func (tb *traceBuffer) liveCount() int {
 	return len(tb.liveParents)
 }
 
-// TransactionSpanProcessor wraps a SpanExporter to tag Coralogix transactions,
-// stamp cgx.transaction.self_duration, trim, and export completed local traces.
+// TransactionSpanProcessor wraps a SpanExporter to enrich eligible Coralogix
+// transactions and export completed local traces without dropping spans.
 type TransactionSpanProcessor struct {
 	exporter sdktrace.SpanExporter
 
@@ -111,7 +112,6 @@ type TransactionSpanProcessor struct {
 
 	selfDurationHistogram syncfloat64.Histogram
 
-	maxNodes           int
 	completionHoldback time.Duration
 
 	shutdownOnce sync.Once
@@ -139,13 +139,6 @@ func WithMeterProvider(meterProvider metric.MeterProvider) Option {
 		if histogram := newSelfDurationHistogram(meterProvider); histogram != nil {
 			p.selfDurationHistogram = histogram
 		}
-	}
-}
-
-// WithMaxNodes caps spans kept per completed local trace (slowest first; root always kept).
-func WithMaxNodes(maxNodes int) Option {
-	return func(p *TransactionSpanProcessor) {
-		p.maxNodes = maxNodes
 	}
 }
 
@@ -179,17 +172,16 @@ func newSelfDurationHistogram(meterProvider metric.MeterProvider) syncfloat64.Hi
 	return histogram
 }
 
-// NewTransactionSpanProcessor builds a processor. Options override env vars;
-// unset options fall back to OTEL_CX_TRANSACTION_* then package defaults.
+// NewTransactionSpanProcessor builds a processor. Unset options fall back to
+// OTEL_CX_TRANSACTION_* settings then package defaults.
 func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option) *TransactionSpanProcessor {
-	maxNodes, completionHoldback := defaultsFromEnv()
+	completionHoldback := defaultsFromEnv()
 	p := &TransactionSpanProcessor{
 		exporter:           exporter,
 		traces:             make(map[tracecore.TraceID]*traceBuffer),
 		membership:         make(map[spanRef]spanMembership),
 		childIntervals:     make(map[spanRef][]interval),
 		finalizedNames:     make(map[spanRef]finalizedTxn),
-		maxNodes:           maxNodes,
 		completionHoldback: completionHoldback,
 	}
 	p.idle = sync.NewCond(&p.mu)
@@ -232,7 +224,9 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 	if tb.liveParents == nil {
 		tb.liveParents = make(map[tracecore.SpanID]tracecore.SpanID)
 	}
-	beginTransaction(ctx, s, p.membership, p.finalizedNames)
+	if !tb.passthrough {
+		beginTransaction(ctx, s, p.membership, p.finalizedNames)
+	}
 
 	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
 	if p.stopped {
@@ -269,6 +263,25 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		p.membership[spanRefFromContext(s.SpanContext())] = spanMembership{}
 	}
 
+	if tb.passthrough {
+		delete(p.membership, spanRefFromContext(s.SpanContext()))
+		delete(p.childIntervals, spanRefFromContext(s.SpanContext()))
+		delete(tb.liveParents, s.SpanContext().SpanID())
+		p.schedulePassthroughCleanupLocked(traceID, tb)
+		p.pendingFinalize++
+		if p.totalLiveLocked() == 0 {
+			p.idle.Broadcast()
+		}
+		p.mu.Unlock()
+
+		_ = p.exportSpansCtx(context.Background(), withoutTransactionAttributes([]sdktrace.ReadOnlySpan{s}))
+		p.mu.Lock()
+		p.pendingFinalize--
+		p.idle.Broadcast()
+		p.mu.Unlock()
+		return
+	}
+
 	// Only retain intervals for parents we track locally. Remote / external
 	// parent IDs are never cleaned by acceptCompleted and would leak.
 	if parent := s.Parent(); parent.IsValid() && isLocalParent(parent.SpanID(), tb) {
@@ -281,6 +294,36 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	tb.spans = append(tb.spans, s)
 	delete(tb.liveParents, s.SpanContext().SpanID())
+	if len(tb.spans) > MaxSelfDurationSpans {
+		p.stopCompleteTimerLocked(tb)
+		p.stopNestedCompleteTimerLocked(tb)
+		tb.passthrough = true
+		for _, buffered := range tb.spans {
+			ref := spanRefFromContext(buffered.SpanContext())
+			delete(p.membership, ref)
+			delete(p.childIntervals, ref)
+		}
+		for spanID := range tb.liveParents {
+			ref := spanRefOf(traceID, spanID)
+			delete(p.membership, ref)
+			delete(p.childIntervals, ref)
+		}
+		raw := withoutTransactionAttributes(tb.spans)
+		tb.spans = nil
+		p.schedulePassthroughCleanupLocked(traceID, tb)
+		p.pendingFinalize++
+		if p.totalLiveLocked() == 0 {
+			p.idle.Broadcast()
+		}
+		p.mu.Unlock()
+
+		_ = p.exportSpansCtx(context.Background(), raw)
+		p.mu.Lock()
+		p.pendingFinalize--
+		p.idle.Broadcast()
+		p.mu.Unlock()
+		return
+	}
 
 	var batches [][]sdktrace.ReadOnlySpan
 	if tb.liveCount() > 0 {
