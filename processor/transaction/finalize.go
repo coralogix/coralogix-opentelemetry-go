@@ -384,7 +384,6 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 				continue
 			}
 			if tb.liveCount() > 0 {
-				batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, false)...)
 				continue
 			}
 			batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, true)...)

@@ -362,7 +362,8 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	var batches [][]sdktrace.ReadOnlySpan
 	if tb.liveCount() > 0 {
-		batches = p.scheduleNestedCompletionLocked(traceID, tb)
+		// Wait for the whole trace so a later span-limit overflow cannot leave
+		// an already exported nested batch enriched.
 	} else {
 		p.stopNestedCompleteTimerLocked(tb)
 		batches = p.scheduleCompletionLocked(traceID, tb)

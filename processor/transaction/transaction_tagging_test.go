@@ -432,8 +432,7 @@ func TestTagTransaction_LateGrandchildWaitsForLiveParent(t *testing.T) {
 	root.SetName("GET /orders")
 	root.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	require.Len(t, exporter.GetSpans(), 1)
-	exporter.Reset()
+	require.Empty(t, exporter.GetSpans(), "nested transaction must wait for the whole trace")
 
 	lateCtx, late := tracer.Start(rootCtx, "late-child",
 		tracecore.WithSpanKind(tracecore.SpanKindInternal),
@@ -447,13 +446,15 @@ func TestTagTransaction_LateGrandchildWaitsForLiveParent(t *testing.T) {
 
 	late.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	spans := exporter.GetSpans()
-	require.Len(t, spans, 2)
-	assertAttribute(t, findSpan(t, spans, "late-child").Attributes, sampler.TransactionIdentifier, "GET /orders")
-	assertAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assert.Empty(t, exporter.GetSpans(), "late spans must wait for the whole trace")
 
 	outer.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 4)
+	assertAttribute(t, findSpan(t, spans, "GET /orders").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertAttribute(t, findSpan(t, spans, "late-child").Attributes, sampler.TransactionIdentifier, "GET /orders")
+	assertAttribute(t, findSpan(t, spans, "late-grandchild").Attributes, sampler.TransactionIdentifier, "GET /orders")
 }
 
 func TestTagTransaction_SamplerRootClearedOnInherit(t *testing.T) {

@@ -64,7 +64,7 @@ func TestIntegration_ProcessorOnly(t *testing.T) {
 	assertFloat64Attribute(t, child.Attributes, SelfDurationAttribute, 0.06)
 }
 
-func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T) {
+func TestIntegration_NestedLocalTransactionWaitsForOuterTrace(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
@@ -92,11 +92,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	innerSpan.End(tracecore.WithTimestamp(base.Add(60 * time.Millisecond)))
 
 	beforeOuterEnds := exporter.GetSpans()
-	require.Len(t, beforeOuterEnds, 2, "nested local transaction must finalize before outer ends")
-	inner := findSpan(t, beforeOuterEnds, "inner-server")
-	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
-	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
-	assertFloat64Attribute(t, inner.Attributes, SelfDurationAttribute, 0.02)
+	require.Empty(t, beforeOuterEnds, "nested local transaction must wait for the whole trace")
 
 	_, outerChild := tracer.Start(outerCtx, "outer-child",
 		tracecore.WithTimestamp(base.Add(70*time.Millisecond)),
@@ -106,6 +102,10 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 
 	spans := exporter.GetSpans()
 	require.Len(t, spans, 4)
+	inner := findSpan(t, spans, "inner-server")
+	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
+	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
+	assertFloat64Attribute(t, inner.Attributes, SelfDurationAttribute, 0.02)
 
 	outer := findSpan(t, spans, "outer-server")
 	assertAttribute(t, outer.Attributes, sampler.TransactionIdentifier, "outer-server")
@@ -159,7 +159,7 @@ func TestIntegration_OuterEndsBeforeNestedStillSeparateTxns(t *testing.T) {
 	assertAttribute(t, outerRoot.Attributes, sampler.TransactionIdentifier, "outer")
 }
 
-func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.T) {
+func TestIntegration_LateNestedChildWaitsForOuterTrace(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -174,29 +174,22 @@ func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.
 	)
 	nested.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	require.Len(t, exporter.GetSpans(), 1)
-	assertAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier, "nested")
-	exporter.Reset()
+	require.Empty(t, exporter.GetSpans())
 
-	// Fire-and-forget child of the already-finalized nested root while outer
-	// is still live must not stay buffered until outer ends.
 	_, late := tracer.Start(nestedCtx, "late-nested-child",
 		tracecore.WithSpanKind(tracecore.SpanKindInternal),
 	)
 	late.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-
-	lateSpans := exporter.GetSpans()
-	require.Len(t, lateSpans, 1, "late child of finalized nested must export while outer is live")
-	assertAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifier, "nested")
-	assertNoAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifierRoot)
-	exporter.Reset()
+	require.Empty(t, exporter.GetSpans())
 
 	outer.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	outerSpans := exporter.GetSpans()
-	require.Len(t, outerSpans, 1)
-	assertAttribute(t, outerSpans[0].Attributes, sampler.TransactionIdentifier, "outer")
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 3)
+	assertAttribute(t, findSpan(t, spans, "nested").Attributes, sampler.TransactionIdentifier, "nested")
+	assertAttribute(t, findSpan(t, spans, "late-nested-child").Attributes, sampler.TransactionIdentifier, "nested")
+	assertAttribute(t, findSpan(t, spans, "outer").Attributes, sampler.TransactionIdentifier, "outer")
 }
 
 func TestIntegration_RootlessPartitionsExportIndependently(t *testing.T) {
