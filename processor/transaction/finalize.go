@@ -380,6 +380,9 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 		for id, tb := range p.traces {
 			p.stopCompleteTimerLocked(tb)
 			p.stopNestedCompleteTimerLocked(tb)
+			if tb.passthrough {
+				continue
+			}
 			if tb.liveCount() > 0 {
 				batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, false)...)
 				continue

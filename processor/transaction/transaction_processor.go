@@ -244,7 +244,7 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked() >= p.maxTraces,
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingFinalize >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 	}
@@ -287,7 +287,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked() >= p.maxTraces,
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingFinalize >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
