@@ -42,7 +42,7 @@ func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktra
 		for _, s := range spans {
 			delete(p.membership, spanRefFromContext(s.SpanContext()))
 		}
-		return withoutTransactionAttributes(spans)
+		return spans
 	}
 	tracked := make(map[spanRef]spanMembership, len(spans))
 	for _, s := range spans {
@@ -251,29 +251,11 @@ func (p *TransactionSpanProcessor) stopNestedCompleteTimerLocked(tb *traceBuffer
 	}
 }
 
-// schedulePassthroughCleanupLocked retains only the trace marker after a batch
-// crosses maxTransactionSpans, so late spans remain raw passthrough spans.
+// schedulePassthroughCleanupLocked retains the trace marker so late spans
+// remain raw passthrough spans.
 // Caller must hold p.mu.
 func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID tracecore.TraceID, tb *traceBuffer) {
-	if tb.liveCount() > 0 {
-		return
-	}
 	p.stopCompleteTimerLocked(tb)
-	if p.completionHoldback <= 0 {
-		delete(p.traces, traceID)
-		return
-	}
-	var timer *time.Timer
-	timer = time.AfterFunc(p.completionHoldback, func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		cur, ok := p.traces[traceID]
-		if ok && cur == tb && cur.passthrough && cur.liveCount() == 0 && cur.completeTimer == timer {
-			delete(p.traces, traceID)
-			p.idle.Broadcast()
-		}
-	})
-	tb.completeTimer = timer
 }
 
 func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {

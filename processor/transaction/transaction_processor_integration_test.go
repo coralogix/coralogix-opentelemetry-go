@@ -304,7 +304,6 @@ func TestIntegration_EnrichesOnlyEligibleBatch(t *testing.T) {
 				} else {
 					assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
 					assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
-					assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifierRoot)
 				}
 			}
 			require.NoError(t, tp.Shutdown(context.Background()))
@@ -333,6 +332,51 @@ func TestIntegration_TransactionSpanLimitFlushesRaw(t *testing.T) {
 		assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
 		assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
 	}
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_RawPassthroughPreservesExplicitTransactionAttributes(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("raw-explicit-transaction")
+
+	_, span := tracer.Start(context.Background(), "operation", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	sampler.StartNewTransaction(span, "explicit-transaction")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "explicit-transaction")
+	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierExplicit)
+	assertNoAttribute(t, spans[0].Attributes, SelfDurationAttribute)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_LateSpansStayRawAfterTraceOverflows(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(1))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("late-raw-passthrough")
+
+	rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	_, first := tracer.Start(rootCtx, "first")
+	_, second := tracer.Start(rootCtx, "second")
+	first.End()
+	second.End()
+	root.End()
+
+	_, late := tracer.Start(rootCtx, "late")
+	late.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 4)
+	lateSpan := findSpan(t, spans, "late")
+	assertNoAttribute(t, lateSpan.Attributes, sampler.TransactionIdentifier)
+	assertNoAttribute(t, lateSpan.Attributes, SelfDurationAttribute)
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 

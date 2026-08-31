@@ -302,7 +302,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		}
 		p.mu.Unlock()
 
-		_ = p.exportSpansCtx(context.Background(), withoutTransactionAttributes([]sdktrace.ReadOnlySpan{s}))
+		_ = p.exportSpansCtx(context.Background(), []sdktrace.ReadOnlySpan{s})
 		p.mu.Lock()
 		p.pendingFinalize--
 		p.idle.Broadcast()
@@ -336,7 +336,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 			delete(p.membership, ref)
 			delete(p.childIntervals, ref)
 		}
-		raw := withoutTransactionAttributes(tb.spans)
+		raw := tb.spans
 		tb.spans = nil
 		p.schedulePassthroughCleanupLocked(traceID, tb)
 		p.pendingFinalize++
