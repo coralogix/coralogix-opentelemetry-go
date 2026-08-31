@@ -31,6 +31,30 @@ func TestDefaultsFromEnv_ParsesValues(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, holdback)
 }
 
+func TestTransactionLimitEnv(t *testing.T) {
+	t.Setenv(EnvMaxTransactionSpans, "12")
+	t.Setenv(EnvMaxTraces, "34")
+
+	assert.Equal(t, 12, maxTransactionSpansFromEnv())
+	assert.Equal(t, 34, maxTracesFromEnv())
+}
+
+func TestTransactionLimitEnv_InvalidFallsBack(t *testing.T) {
+	t.Setenv(EnvMaxTransactionSpans, "-1")
+	t.Setenv(EnvMaxTraces, "invalid")
+
+	assert.Equal(t, DefaultMaxTransactionSpans, maxTransactionSpansFromEnv())
+	assert.Equal(t, DefaultMaxTraces, maxTracesFromEnv())
+}
+
+func TestTransactionLimitEnv_ZeroDisablesBuffering(t *testing.T) {
+	t.Setenv(EnvMaxTransactionSpans, "0")
+	t.Setenv(EnvMaxTraces, "0")
+
+	assert.Zero(t, maxTransactionSpansFromEnv())
+	assert.Zero(t, maxTracesFromEnv())
+}
+
 func TestDefaultsFromEnv_MillisOverflowFallsBack(t *testing.T) {
 	// math.MaxInt64 ms overflows Duration multiplication to a negative value.
 	t.Setenv(EnvCompletionHoldbackMillis, "9223372036854775807")
@@ -75,4 +99,21 @@ func TestNewTransactionSpanProcessor_EnvUsedWhenOptionsUnset(t *testing.T) {
 	p := NewTransactionSpanProcessor(exporter)
 	require.NotNil(t, p)
 	assert.Equal(t, 50*time.Millisecond, p.completionHoldback)
+}
+
+func TestNewTransactionSpanProcessor_TransactionLimitsOptionsOverrideEnv(t *testing.T) {
+	t.Setenv(EnvMaxTransactionSpans, "50")
+	t.Setenv(EnvMaxTraces, "60")
+
+	p := NewTransactionSpanProcessor(sdktracetest.NewInMemoryExporter(),
+		WithMaxTransactionSpans(10), WithMaxTraces(20))
+	assert.Equal(t, 10, p.maxTransactionSpans)
+	assert.Equal(t, 20, p.maxTraces)
+}
+
+func TestNewTransactionSpanProcessor_ZeroOptionsDisableBuffering(t *testing.T) {
+	p := NewTransactionSpanProcessor(sdktracetest.NewInMemoryExporter(),
+		WithMaxTransactionSpans(0), WithMaxTraces(0))
+	assert.Zero(t, p.maxTransactionSpans)
+	assert.Zero(t, p.maxTraces)
 }

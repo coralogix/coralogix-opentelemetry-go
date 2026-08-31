@@ -7,8 +7,8 @@
 //     parent txn). Mark cgx.transaction.root on new roots. Track membership.
 //     Do not freeze cgx.transaction from the early span name.
 //   - OnEnd / holdback: buffer until local transaction trees complete, unless
-//     the 257th completed span triggers immediate raw passthrough.
-//   - acceptCompleted (export finalize): batches of at most 256 spans receive
+//     the configured span limit plus one triggers immediate raw passthrough.
+//   - acceptCompleted (export finalize): batches within the configured limit receive
 //     transaction tags, self-duration, and metrics; larger batches export raw.
 package transaction
 
@@ -112,7 +112,9 @@ type TransactionSpanProcessor struct {
 
 	selfDurationHistogram syncfloat64.Histogram
 
-	completionHoldback time.Duration
+	completionHoldback  time.Duration
+	maxTransactionSpans int
+	maxTraces           int
 
 	shutdownOnce sync.Once
 	shutdownErr  error
@@ -149,6 +151,26 @@ func WithCompletionHoldback(d time.Duration) Option {
 	}
 }
 
+// WithMaxTransactionSpans sets the maximum completed spans buffered for one
+// trace. The next span flushes that trace raw. Zero makes every span raw.
+func WithMaxTransactionSpans(n int) Option {
+	return func(p *TransactionSpanProcessor) {
+		if n >= 0 {
+			p.maxTransactionSpans = n
+		}
+	}
+}
+
+// WithMaxTraces sets the maximum traces buffered concurrently. Further traces
+// are raw passthrough. Zero makes every trace raw.
+func WithMaxTraces(n int) Option {
+	return func(p *TransactionSpanProcessor) {
+		if n >= 0 {
+			p.maxTraces = n
+		}
+	}
+}
+
 // WithMaxFinalizedNames caps SpanID→transaction-name entries retained after a
 // local batch is finalized (for late fire-and-forget children). When n <= 0,
 // DefaultMaxFinalizedNames is used.
@@ -177,12 +199,14 @@ func newSelfDurationHistogram(meterProvider metric.MeterProvider) syncfloat64.Hi
 func NewTransactionSpanProcessor(exporter sdktrace.SpanExporter, opts ...Option) *TransactionSpanProcessor {
 	completionHoldback := defaultsFromEnv()
 	p := &TransactionSpanProcessor{
-		exporter:           exporter,
-		traces:             make(map[tracecore.TraceID]*traceBuffer),
-		membership:         make(map[spanRef]spanMembership),
-		childIntervals:     make(map[spanRef][]interval),
-		finalizedNames:     make(map[spanRef]finalizedTxn),
-		completionHoldback: completionHoldback,
+		exporter:            exporter,
+		traces:              make(map[tracecore.TraceID]*traceBuffer),
+		membership:          make(map[spanRef]spanMembership),
+		childIntervals:      make(map[spanRef][]interval),
+		finalizedNames:      make(map[spanRef]finalizedTxn),
+		completionHoldback:  completionHoldback,
+		maxTransactionSpans: maxTransactionSpansFromEnv(),
+		maxTraces:           maxTracesFromEnv(),
 	}
 	p.idle = sync.NewCond(&p.mu)
 	for _, opt := range opts {
@@ -218,6 +242,7 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked() >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 	}
@@ -257,10 +282,13 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked() >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
-		p.membership[spanRefFromContext(s.SpanContext())] = spanMembership{}
+		if !tb.passthrough {
+			p.membership[spanRefFromContext(s.SpanContext())] = spanMembership{}
+		}
 	}
 
 	if tb.passthrough {
@@ -294,7 +322,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	tb.spans = append(tb.spans, s)
 	delete(tb.liveParents, s.SpanContext().SpanID())
-	if len(tb.spans) > MaxSelfDurationSpans {
+	if len(tb.spans) > p.maxTransactionSpans {
 		p.stopCompleteTimerLocked(tb)
 		p.stopNestedCompleteTimerLocked(tb)
 		tb.passthrough = true
@@ -371,6 +399,16 @@ func (p *TransactionSpanProcessor) liveSpanCountLocked() int {
 	n := 0
 	for _, tb := range p.traces {
 		n += tb.liveCount()
+	}
+	return n
+}
+
+func (p *TransactionSpanProcessor) bufferedTraceCountLocked() int {
+	n := 0
+	for _, tb := range p.traces {
+		if !tb.passthrough {
+			n++
+		}
 	}
 	return n
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // acceptCompleted finalizes one completed local-transaction batch. Batches at
-// most MaxSelfDurationSpans receive transaction tagging, self-duration, and
+// within maxTransactionSpans receive transaction tagging, self-duration, and
 // metrics. Larger batches normally switch to raw passthrough in OnEnd.
 func (p *TransactionSpanProcessor) acceptCompleted(spans []sdktrace.ReadOnlySpan) {
 	_ = p.acceptCompletedCtx(context.Background(), spans)
@@ -38,7 +38,7 @@ func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktra
 	if len(spans) == 0 {
 		return nil
 	}
-	if len(spans) > MaxSelfDurationSpans {
+	if len(spans) > p.maxTransactionSpans {
 		for _, s := range spans {
 			delete(p.membership, spanRefFromContext(s.SpanContext()))
 		}
@@ -73,7 +73,7 @@ func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named
 		return nil
 	}
 	groups := [][]sdktrace.ReadOnlySpan{named}
-	if len(named) <= MaxSelfDurationSpans {
+	if len(named) <= p.maxTransactionSpans {
 		groups = groupByTransactionName(named)
 		for i, group := range groups {
 			groups[i] = p.stampSelfDurationAndMetrics(group)
@@ -252,7 +252,7 @@ func (p *TransactionSpanProcessor) stopNestedCompleteTimerLocked(tb *traceBuffer
 }
 
 // schedulePassthroughCleanupLocked retains only the trace marker after a batch
-// crosses MaxSelfDurationSpans, so late spans remain raw passthrough spans.
+// crosses maxTransactionSpans, so late spans remain raw passthrough spans.
 // Caller must hold p.mu.
 func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID tracecore.TraceID, tb *traceBuffer) {
 	if tb.liveCount() > 0 {

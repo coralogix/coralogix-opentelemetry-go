@@ -288,8 +288,8 @@ func TestIntegration_EnrichesOnlyEligibleBatch(t *testing.T) {
 			for i := 1; i < tc.spans; i++ {
 				_, child := tracer.Start(rootCtx, "child", tracecore.WithTimestamp(base))
 				child.End(tracecore.WithTimestamp(base.Add(time.Millisecond)))
-				if tc.spans > MaxSelfDurationSpans && i == MaxSelfDurationSpans+1 {
-					require.Len(t, exporter.GetSpans(), MaxSelfDurationSpans+1,
+				if tc.spans > DefaultMaxTransactionSpans && i == DefaultMaxTransactionSpans+1 {
+					require.Len(t, exporter.GetSpans(), DefaultMaxTransactionSpans+1,
 						"the 257th completed span must flush the raw buffered batch")
 				}
 			}
@@ -310,6 +310,69 @@ func TestIntegration_EnrichesOnlyEligibleBatch(t *testing.T) {
 			require.NoError(t, tp.Shutdown(context.Background()))
 		})
 	}
+}
+
+func TestIntegration_TransactionSpanLimitFlushesRaw(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(2))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("transaction-limit-test")
+
+	rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	for i := 0; i < 3; i++ {
+		_, child := tracer.Start(rootCtx, "child")
+		child.End()
+	}
+	require.Len(t, exporter.GetSpans(), 3, "third completed span flushes raw")
+	root.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 4)
+	for _, span := range spans {
+		assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
+		assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
+	}
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_MaxTracesUsesRawPassthrough(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTraces(1))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("trace-limit-test")
+
+	_, first := tracer.Start(context.Background(), "first", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	_, second := tracer.Start(context.Background(), "second", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	second.End()
+	require.Len(t, exporter.GetSpans(), 1)
+	assertNoAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier)
+	assertNoAttribute(t, exporter.GetSpans()[0].Attributes, SelfDurationAttribute)
+
+	first.End()
+	require.Len(t, exporter.GetSpans(), 2)
+
+	_, third := tracer.Start(context.Background(), "third", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	third.End()
+	require.Len(t, exporter.GetSpans(), 3)
+	assertHasAttribute(t, exporter.GetSpans()[2].Attributes, sampler.TransactionIdentifier)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_ZeroMaxTracesIsUnlimited(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTraces(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("zero-trace-limit-test")
+
+	_, span := tracer.Start(context.Background(), "unlimited", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	span.End()
+	require.Len(t, exporter.GetSpans(), 1)
+	assertHasAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier)
+	assertHasAttribute(t, exporter.GetSpans()[0].Attributes, SelfDurationAttribute)
+	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
 func assertHasAttribute(t *testing.T, attrs []attribute.KeyValue, key string) {

@@ -20,7 +20,7 @@ seconds), and records the matching histogram.
 
 ### Transaction enrichment limit
 
-Transactions buffer up to **256** completed spans. When the 257th span ends,
+Transactions buffer up to **256** completed spans by default. When the next span ends,
 the processor immediately exports those buffered spans unchanged and proxies
 all later spans unchanged. Transactions that finish at 256 spans or fewer
 receive transaction tags, self-duration, and its metric.
@@ -28,10 +28,13 @@ receive transaction tags, self-duration, and its metric.
 ### Options and env vars
 
 Invalid env values fall back to defaults.
+Set either limit to `0` to use raw passthrough from the first span or trace.
 
 | Option | Env var | Default | Meaning |
 |--------|---------|---------|---------|
 | `WithCompletionHoldback` | `OTEL_CX_TRANSACTION_COMPLETION_HOLDBACK_MILLIS` | `100` | Post-idle delay before finalizing a local trace |
+| `WithMaxTransactionSpans` | `CORALOGIX_MAX_SPANS_PER_TRACE` | `256` | Completed spans buffered per trace before raw passthrough |
+| `WithMaxTraces` | `CORALOGIX_MAX_TRANSACTION_TRACES` | `0` | Transactions retained in memory while live or awaiting completion; positive values cap this buffer, while `0` is unlimited |
 | `WithMeterProvider` | — | global | MeterProvider for `cgx.transaction.self_duration` |
 
 ```go
