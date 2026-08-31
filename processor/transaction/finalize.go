@@ -303,6 +303,9 @@ func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.Tr
 		}
 		batches = p.publishCompletedBatchesLocked(batches)
 		p.pendingFinalize += len(batches)
+		if len(batches) > 0 {
+			p.pendingTraces++
+		}
 		p.mu.Unlock()
 
 		for _, batch := range batches {
@@ -310,6 +313,11 @@ func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.Tr
 			p.mu.Lock()
 			p.pendingFinalize--
 			p.idle.Broadcast()
+			p.mu.Unlock()
+		}
+		if len(batches) > 0 {
+			p.mu.Lock()
+			p.pendingTraces--
 			p.mu.Unlock()
 		}
 	})
@@ -377,6 +385,7 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 	}
 	for {
 		var batches [][]sdktrace.ReadOnlySpan
+		pendingTraces := 0
 		for id, tb := range p.traces {
 			p.stopCompleteTimerLocked(tb)
 			p.stopNestedCompleteTimerLocked(tb)
@@ -386,7 +395,11 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 			if tb.liveCount() > 0 {
 				continue
 			}
-			batches = append(batches, p.extractCompletedLocalTransactionsLocked(tb, true)...)
+			traceBatches := p.extractCompletedLocalTransactionsLocked(tb, true)
+			batches = append(batches, traceBatches...)
+			if len(traceBatches) > 0 {
+				pendingTraces++
+			}
 			if len(tb.spans) == 0 {
 				delete(p.traces, id)
 			}
@@ -396,6 +409,7 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 			return nil
 		}
 		p.pendingFinalize += len(batches)
+		p.pendingTraces += pendingTraces
 		var firstErr error
 		batches = p.publishCompletedBatchesLocked(batches)
 		for _, spans := range batches {
@@ -409,6 +423,7 @@ func (p *TransactionSpanProcessor) flushPendingCompletionsLocked(ctx context.Con
 				firstErr = err
 			}
 		}
+		p.pendingTraces -= pendingTraces
 		p.idle.Broadcast()
 		if firstErr != nil {
 			return firstErr

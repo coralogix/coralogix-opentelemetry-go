@@ -127,6 +127,9 @@ type TransactionSpanProcessor struct {
 	idle             *sync.Cond
 	// pendingFinalize counts acceptCompleted still running outside p.mu; waitForIdle waits for it.
 	pendingFinalize int
+	// pendingTraces reserves one maxTraces slot per completed trace while its
+	// batches await export. It is intentionally independent of pendingFinalize.
+	pendingTraces int
 
 	// exportMu serializes ExportSpans and exporter.Shutdown.
 	exportMu  sync.Mutex
@@ -245,7 +248,7 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingFinalize >= p.maxTraces,
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingTraces >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 	}
@@ -288,7 +291,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		tb = &traceBuffer{
 			id:          traceID,
 			liveParents: make(map[tracecore.SpanID]tracecore.SpanID),
-			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingFinalize >= p.maxTraces,
+			passthrough: p.maxTraces > 0 && p.bufferedTraceCountLocked()+p.pendingTraces >= p.maxTraces,
 		}
 		p.traces[traceID] = tb
 		tb.liveParents[s.SpanContext().SpanID()] = s.Parent().SpanID()
@@ -371,6 +374,9 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	batches = p.publishCompletedBatchesLocked(batches)
 	p.pendingFinalize += len(batches)
+	if len(batches) > 0 {
+		p.pendingTraces++
+	}
 	if p.totalLiveLocked() == 0 {
 		p.idle.Broadcast()
 	}
@@ -380,6 +386,12 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		_ = p.finishCompletedCtx(context.Background(), batch)
 		p.mu.Lock()
 		p.pendingFinalize--
+		p.idle.Broadcast()
+		p.mu.Unlock()
+	}
+	if len(batches) > 0 {
+		p.mu.Lock()
+		p.pendingTraces--
 		p.idle.Broadcast()
 		p.mu.Unlock()
 	}
