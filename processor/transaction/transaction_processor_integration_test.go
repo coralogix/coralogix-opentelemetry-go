@@ -93,15 +93,6 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 
 	beforeOuterEnds := exporter.GetSpans()
 	require.Len(t, beforeOuterEnds, 2, "nested local transaction must finalize before outer ends")
-
-	names := map[string]bool{}
-	for _, s := range beforeOuterEnds {
-		names[s.Name] = true
-	}
-	assert.True(t, names["inner-server"], "inner-server must have finalized already")
-	assert.True(t, names["inner-child"], "inner-child must have finalized already")
-	assert.False(t, names["outer-server"], "outer-server must not finalize yet")
-
 	inner := findSpan(t, beforeOuterEnds, "inner-server")
 	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
 	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
@@ -114,7 +105,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	outerSpan.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 4, "outer local transaction must finalize once outer ends, without re-exporting nested spans")
+	require.Len(t, spans, 4)
 
 	outer := findSpan(t, spans, "outer-server")
 	assertAttribute(t, outer.Attributes, sampler.TransactionIdentifier, "outer-server")

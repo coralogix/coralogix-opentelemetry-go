@@ -28,7 +28,7 @@ receive transaction tags, self-duration, and its metric.
 ### Options and env vars
 
 Invalid env values fall back to defaults.
-Set either limit to `0` to use raw passthrough from the first span or trace.
+Set `WithMaxTransactionSpans(0)` to use raw passthrough from the first span.
 
 | Option | Env var | Default | Meaning |
 |--------|---------|---------|---------|

@@ -256,6 +256,18 @@ func (p *TransactionSpanProcessor) stopNestedCompleteTimerLocked(tb *traceBuffer
 // Caller must hold p.mu.
 func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID tracecore.TraceID, tb *traceBuffer) {
 	p.stopCompleteTimerLocked(tb)
+	if tb.liveCount() > 0 || tb.passthroughTombstone {
+		return
+	}
+	tb.passthroughTombstone = true
+	p.passthroughOrder = append(p.passthroughOrder, traceID)
+	for len(p.passthroughOrder) > p.maxFinalizedNames {
+		oldest := p.passthroughOrder[0]
+		p.passthroughOrder = p.passthroughOrder[1:]
+		if old, ok := p.traces[oldest]; ok && old.passthrough && old.passthroughTombstone && old.liveCount() == 0 {
+			delete(p.traces, oldest)
+		}
+	}
 }
 
 func (p *TransactionSpanProcessor) scheduleCompletionLocked(traceID tracecore.TraceID, tb *traceBuffer) [][]sdktrace.ReadOnlySpan {

@@ -81,12 +81,13 @@ type finalizedTxn struct {
 }
 
 type traceBuffer struct {
-	id                  tracecore.TraceID
-	spans               []sdktrace.ReadOnlySpan
-	liveParents         map[tracecore.SpanID]tracecore.SpanID
-	passthrough         bool
-	completeTimer       *time.Timer
-	nestedCompleteTimer *time.Timer
+	id                   tracecore.TraceID
+	spans                []sdktrace.ReadOnlySpan
+	liveParents          map[tracecore.SpanID]tracecore.SpanID
+	passthrough          bool
+	passthroughTombstone bool
+	completeTimer        *time.Timer
+	nestedCompleteTimer  *time.Timer
 }
 
 func (tb *traceBuffer) liveCount() int {
@@ -108,6 +109,7 @@ type TransactionSpanProcessor struct {
 	// FIFO insertion order for eviction when over maxFinalizedNames.
 	finalizedNames    map[spanRef]finalizedTxn
 	finalizedOrder    []spanRef
+	passthroughOrder  []tracecore.TraceID
 	maxFinalizedNames int
 
 	selfDurationHistogram syncfloat64.Histogram
@@ -252,6 +254,9 @@ func (p *TransactionSpanProcessor) OnStart(ctx context.Context, s sdktrace.ReadW
 	if !tb.passthrough {
 		beginTransaction(ctx, s, p.membership, p.finalizedNames)
 	}
+	if tb.passthrough {
+		tb.passthroughTombstone = false
+	}
 
 	// After Shutdown, still register children of tracked traces so OnEnd cannot finalize early.
 	if p.stopped {
@@ -355,8 +360,6 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	var batches [][]sdktrace.ReadOnlySpan
 	if tb.liveCount() > 0 {
-		// Nested local txn finished while an outer ancestor is still live:
-		// apply the same completion holdback so late children can join.
 		batches = p.scheduleNestedCompletionLocked(traceID, tb)
 	} else {
 		p.stopNestedCompleteTimerLocked(tb)
