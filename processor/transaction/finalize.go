@@ -266,6 +266,10 @@ func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID trac
 		p.passthroughOrder = p.passthroughOrder[1:]
 		if old, ok := p.traces[oldest]; ok && old.passthrough && old.passthroughTombstone && old.liveCount() == 0 {
 			delete(p.traces, oldest)
+		} else if old, ok := p.traces[oldest]; ok && old.passthrough {
+			// A live trace consumed its stale queue entry; requeue it when the
+			// last late span ends instead of evicting its current tombstone.
+			old.passthroughTombstone = false
 		}
 	}
 }
