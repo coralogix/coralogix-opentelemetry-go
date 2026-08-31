@@ -162,7 +162,7 @@ func WithMaxTransactionSpans(n int) Option {
 }
 
 // WithMaxTraces sets the maximum traces buffered concurrently. Further traces
-// are raw passthrough. Zero makes every trace raw.
+// are raw passthrough. Zero is unlimited.
 func WithMaxTraces(n int) Option {
 	return func(p *TransactionSpanProcessor) {
 		if n >= 0 {
