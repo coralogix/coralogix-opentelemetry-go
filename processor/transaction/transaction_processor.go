@@ -86,6 +86,7 @@ type traceBuffer struct {
 	liveParents          map[tracecore.SpanID]tracecore.SpanID
 	passthrough          bool
 	passthroughTombstone bool
+	completedSpanCount   int
 	completeTimer        *time.Timer
 	nestedCompleteTimer  *time.Timer
 }
@@ -326,8 +327,9 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	}
 
 	tb.spans = append(tb.spans, s)
+	tb.completedSpanCount++
 	delete(tb.liveParents, s.SpanContext().SpanID())
-	if len(tb.spans) > p.maxTransactionSpans {
+	if tb.completedSpanCount > p.maxTransactionSpans {
 		p.stopCompleteTimerLocked(tb)
 		p.stopNestedCompleteTimerLocked(tb)
 		tb.passthrough = true
