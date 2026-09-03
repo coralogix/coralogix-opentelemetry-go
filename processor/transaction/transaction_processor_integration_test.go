@@ -64,7 +64,7 @@ func TestIntegration_ProcessorOnly(t *testing.T) {
 	assertFloat64Attribute(t, child.Attributes, SelfDurationAttribute, 0.06)
 }
 
-func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T) {
+func TestIntegration_NestedLocalTransactionWaitsForOuterTrace(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 
@@ -92,20 +92,7 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	innerSpan.End(tracecore.WithTimestamp(base.Add(60 * time.Millisecond)))
 
 	beforeOuterEnds := exporter.GetSpans()
-	require.Len(t, beforeOuterEnds, 2, "nested local transaction must finalize before outer ends")
-
-	names := map[string]bool{}
-	for _, s := range beforeOuterEnds {
-		names[s.Name] = true
-	}
-	assert.True(t, names["inner-server"], "inner-server must have finalized already")
-	assert.True(t, names["inner-child"], "inner-child must have finalized already")
-	assert.False(t, names["outer-server"], "outer-server must not finalize yet")
-
-	inner := findSpan(t, beforeOuterEnds, "inner-server")
-	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
-	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
-	assertFloat64Attribute(t, inner.Attributes, SelfDurationAttribute, 0.02)
+	require.Empty(t, beforeOuterEnds, "nested local transaction must wait for the whole trace")
 
 	_, outerChild := tracer.Start(outerCtx, "outer-child",
 		tracecore.WithTimestamp(base.Add(70*time.Millisecond)),
@@ -114,7 +101,11 @@ func TestIntegration_NestedLocalTransactionFinalizesBeforeOuterEnds(t *testing.T
 	outerSpan.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 4, "outer local transaction must finalize once outer ends, without re-exporting nested spans")
+	require.Len(t, spans, 4)
+	inner := findSpan(t, spans, "inner-server")
+	assertAttribute(t, inner.Attributes, sampler.TransactionIdentifier, "inner-server")
+	assertBoolAttribute(t, inner.Attributes, sampler.TransactionIdentifierRoot, true)
+	assertFloat64Attribute(t, inner.Attributes, SelfDurationAttribute, 0.02)
 
 	outer := findSpan(t, spans, "outer-server")
 	assertAttribute(t, outer.Attributes, sampler.TransactionIdentifier, "outer-server")
@@ -168,7 +159,7 @@ func TestIntegration_OuterEndsBeforeNestedStillSeparateTxns(t *testing.T) {
 	assertAttribute(t, outerRoot.Attributes, sampler.TransactionIdentifier, "outer")
 }
 
-func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.T) {
+func TestIntegration_LateNestedChildWaitsForOuterTrace(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
@@ -183,40 +174,32 @@ func TestIntegration_LateChildOfFinalizedNestedExportsWhileOuterLive(t *testing.
 	)
 	nested.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	require.Len(t, exporter.GetSpans(), 1)
-	assertAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier, "nested")
-	exporter.Reset()
+	require.Empty(t, exporter.GetSpans())
 
-	// Fire-and-forget child of the already-finalized nested root while outer
-	// is still live must not stay buffered until outer ends.
 	_, late := tracer.Start(nestedCtx, "late-nested-child",
 		tracecore.WithSpanKind(tracecore.SpanKindInternal),
 	)
 	late.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-
-	lateSpans := exporter.GetSpans()
-	require.Len(t, lateSpans, 1, "late child of finalized nested must export while outer is live")
-	assertAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifier, "nested")
-	assertNoAttribute(t, lateSpans[0].Attributes, sampler.TransactionIdentifierRoot)
-	exporter.Reset()
+	require.Empty(t, exporter.GetSpans())
 
 	outer.End()
 	require.NoError(t, processor.ForceFlush(context.Background()))
-	outerSpans := exporter.GetSpans()
-	require.Len(t, outerSpans, 1)
-	assertAttribute(t, outerSpans[0].Attributes, sampler.TransactionIdentifier, "outer")
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 3)
+	assertAttribute(t, findSpan(t, spans, "nested").Attributes, sampler.TransactionIdentifier, "nested")
+	assertAttribute(t, findSpan(t, spans, "late-nested-child").Attributes, sampler.TransactionIdentifier, "nested")
+	assertAttribute(t, findSpan(t, spans, "outer").Attributes, sampler.TransactionIdentifier, "outer")
 }
 
-func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
+func TestIntegration_RootlessPartitionsExportIndependently(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
 		WithCompletionHoldback(0),
-		WithMaxNodes(1),
 	)
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
 	defer func() { require.NoError(t, tp.Shutdown(context.Background())) }()
-	tracer := tp.Tracer("rootless-trim-partitions")
+	tracer := tp.Tracer("rootless-export-partitions")
 
 	outerCtx, outer := tracer.Start(context.Background(), "gateway",
 		tracecore.WithSpanKind(tracecore.SpanKindServer),
@@ -245,7 +228,7 @@ func TestIntegration_RootlessPartitionsTrimIndependently(t *testing.T) {
 	require.NoError(t, processor.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 2, "each rootless partition must keep its own maxNodes=1 span")
+	require.Len(t, spans, 2, "each rootless partition must export its span")
 	assertAttribute(t, findSpan(t, spans, "late-a").Attributes, sampler.TransactionIdentifier, "txn-a")
 	assertAttribute(t, findSpan(t, spans, "late-b").Attributes, sampler.TransactionIdentifier, "txn-b")
 }
@@ -269,36 +252,165 @@ func TestIntegration_ExportsEveryCompletedTraceImmediately(t *testing.T) {
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
-func TestIntegration_TrimAppliesBeforeExport(t *testing.T) {
+func TestIntegration_EnrichesOnlyEligibleBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		spans    int
+		enriched bool
+	}{
+		{name: "130 spans", spans: 130, enriched: true},
+		{name: "260 spans", spans: 260, enriched: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exporter := sdktracetest.NewInMemoryExporter()
+			processor := NewTransactionSpanProcessor(exporter, WithCompletionHoldback(0))
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+			tracer := tp.Tracer("self-duration-cap-test")
+			base := time.Unix(0, 0)
+
+			rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
+			for i := 1; i < tc.spans; i++ {
+				_, child := tracer.Start(rootCtx, "child", tracecore.WithTimestamp(base))
+				child.End(tracecore.WithTimestamp(base.Add(time.Millisecond)))
+				if tc.spans > DefaultMaxTransactionSpans && i == DefaultMaxTransactionSpans+1 {
+					require.Len(t, exporter.GetSpans(), DefaultMaxTransactionSpans+1,
+						"the 257th completed span must flush the raw buffered batch")
+				}
+			}
+			root.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, tc.spans, "all spans must export")
+			for _, span := range spans {
+				if tc.enriched {
+					assertHasAttribute(t, span.Attributes, SelfDurationAttribute)
+					assertAttribute(t, span.Attributes, sampler.TransactionIdentifier, "root")
+				} else {
+					assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
+					assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
+				}
+			}
+			require.NoError(t, tp.Shutdown(context.Background()))
+		})
+	}
+}
+
+func TestIntegration_TransactionSpanLimitFlushesRaw(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
-		WithMaxNodes(2),
-		WithCompletionHoldback(0),
-	)
+		WithCompletionHoldback(0), WithMaxTransactionSpans(2))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := tp.Tracer("trim-test")
-	base := time.Unix(0, 0)
+	tracer := tp.Tracer("transaction-limit-test")
 
-	rootCtx, root := tracer.Start(context.Background(), "root",
-		tracecore.WithSpanKind(tracecore.SpanKindServer), tracecore.WithTimestamp(base))
-	_, fastChild := tracer.Start(rootCtx, "fast-child", tracecore.WithTimestamp(base))
-	fastChild.End(tracecore.WithTimestamp(base.Add(1 * time.Millisecond)))
-	_, slowChild := tracer.Start(rootCtx, "slow-child", tracecore.WithTimestamp(base))
-	slowChild.End(tracecore.WithTimestamp(base.Add(90 * time.Millisecond)))
-	root.End(tracecore.WithTimestamp(base.Add(100 * time.Millisecond)))
+	rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	for i := 0; i < 3; i++ {
+		_, child := tracer.Start(rootCtx, "child")
+		child.End()
+	}
+	require.Len(t, exporter.GetSpans(), 3, "third completed span flushes raw")
+	root.End()
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 2, "trimmed to maxNodes=2: root + slowest child")
-
-	names := map[string]bool{}
-	for _, s := range spans {
-		names[s.Name] = true
+	require.Len(t, spans, 4)
+	for _, span := range spans {
+		assertNoAttribute(t, span.Attributes, SelfDurationAttribute)
+		assertNoAttribute(t, span.Attributes, sampler.TransactionIdentifier)
 	}
-	assert.True(t, names["root"], "root must always survive trim")
-	assert.True(t, names["slow-child"], "slowest non-root span must survive trim")
-	assert.False(t, names["fast-child"], "fastest non-root span must be trimmed")
-
 	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_RawPassthroughPreservesExplicitTransactionAttributes(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("raw-explicit-transaction")
+
+	_, span := tracer.Start(context.Background(), "operation", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	sampler.StartNewTransaction(span, "explicit-transaction")
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "explicit-transaction")
+	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
+	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierExplicit)
+	assertNoAttribute(t, spans[0].Attributes, SelfDurationAttribute)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_LateSpansStayRawAfterTraceOverflows(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(1))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("late-raw-passthrough")
+
+	rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	_, first := tracer.Start(rootCtx, "first")
+	_, second := tracer.Start(rootCtx, "second")
+	first.End()
+	second.End()
+	root.End()
+
+	_, late := tracer.Start(rootCtx, "late")
+	late.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 4)
+	lateSpan := findSpan(t, spans, "late")
+	assertNoAttribute(t, lateSpan.Attributes, sampler.TransactionIdentifier)
+	assertNoAttribute(t, lateSpan.Attributes, SelfDurationAttribute)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_MaxTracesUsesRawPassthrough(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTraces(1))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("trace-limit-test")
+
+	_, first := tracer.Start(context.Background(), "first", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	_, second := tracer.Start(context.Background(), "second", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	second.End()
+	require.Len(t, exporter.GetSpans(), 1)
+	assertNoAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier)
+	assertNoAttribute(t, exporter.GetSpans()[0].Attributes, SelfDurationAttribute)
+
+	first.End()
+	require.Len(t, exporter.GetSpans(), 2)
+
+	_, third := tracer.Start(context.Background(), "third", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	third.End()
+	require.Len(t, exporter.GetSpans(), 3)
+	assertHasAttribute(t, exporter.GetSpans()[2].Attributes, sampler.TransactionIdentifier)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func TestIntegration_ZeroMaxTracesIsUnlimited(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTraces(0))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("zero-trace-limit-test")
+
+	_, span := tracer.Start(context.Background(), "unlimited", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	span.End()
+	require.Len(t, exporter.GetSpans(), 1)
+	assertHasAttribute(t, exporter.GetSpans()[0].Attributes, sampler.TransactionIdentifier)
+	assertHasAttribute(t, exporter.GetSpans()[0].Attributes, SelfDurationAttribute)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
+func assertHasAttribute(t *testing.T, attrs []attribute.KeyValue, key string) {
+	t.Helper()
+	for _, a := range attrs {
+		if string(a.Key) == key {
+			return
+		}
+	}
+	t.Fatalf("attribute %q not found", key)
 }
 
 func assertAttribute(t *testing.T, attrs []attribute.KeyValue, key, expected string) {
