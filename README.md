@@ -28,12 +28,12 @@ receive transaction tags, self-duration, and its metric.
 ### Options and env vars
 
 Invalid env values fall back to defaults.
-Set `WithMaxTransactionSpans(0)` to use raw passthrough from the first span.
+Set `WithMaxTransactionSpans(0)` for unlimited transaction enrichment.
 
 | Option | Env var | Default | Meaning |
 |--------|---------|---------|---------|
 | `WithCompletionHoldback` | `OTEL_CX_TRANSACTION_COMPLETION_HOLDBACK_MILLIS` | `100` | Post-idle delay before finalizing a local trace |
-| `WithMaxTransactionSpans` | `CORALOGIX_MAX_SPANS_PER_TRACE` | `256` | Completed spans buffered per trace before raw passthrough |
+| `WithMaxTransactionSpans` | `CORALOGIX_MAX_SPANS_PER_TRACE` | `256` | Completed spans buffered per trace before raw passthrough; `0` is unlimited |
 | `WithMaxTraces` | `CORALOGIX_MAX_TRANSACTION_TRACES` | `0` | Transactions retained in memory while live or awaiting completion; positive values cap this buffer, while `0` is unlimited |
 | `WithMeterProvider` | — | global | MeterProvider for `cgx.transaction.self_duration` |
 

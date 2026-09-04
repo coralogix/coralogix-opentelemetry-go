@@ -158,7 +158,7 @@ func WithCompletionHoldback(d time.Duration) Option {
 }
 
 // WithMaxTransactionSpans sets the maximum completed spans buffered for one
-// trace. The next span flushes that trace raw. Zero makes every span raw.
+// trace. The next span flushes that trace raw. Zero is unlimited.
 func WithMaxTransactionSpans(n int) Option {
 	return func(p *TransactionSpanProcessor) {
 		if n >= 0 {
@@ -332,7 +332,7 @@ func (p *TransactionSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	tb.spans = append(tb.spans, s)
 	tb.completedSpanCount++
 	delete(tb.liveParents, s.SpanContext().SpanID())
-	if tb.completedSpanCount > p.maxTransactionSpans {
+	if p.maxTransactionSpans > 0 && tb.completedSpanCount > p.maxTransactionSpans {
 		p.stopCompleteTimerLocked(tb)
 		p.stopNestedCompleteTimerLocked(tb)
 		tb.passthrough = true
