@@ -319,23 +319,27 @@ func TestIntegration_TransactionSpanLimitFlushesRaw(t *testing.T) {
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
-func TestIntegration_RawPassthroughPreservesExplicitTransactionAttributes(t *testing.T) {
+func TestIntegration_ZeroTransactionSpanLimitIsUnlimited(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
 		WithCompletionHoldback(0), WithMaxTransactionSpans(0))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
-	tracer := tp.Tracer("raw-explicit-transaction")
+	tracer := tp.Tracer("unlimited-explicit-transaction")
 
-	_, span := tracer.Start(context.Background(), "operation", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	rootCtx, span := tracer.Start(context.Background(), "operation", tracecore.WithSpanKind(tracecore.SpanKindServer))
 	sampler.StartNewTransaction(span, "explicit-transaction")
+	for i := 0; i < 256; i++ {
+		_, child := tracer.Start(rootCtx, "child")
+		child.End()
+	}
 	span.End()
 
 	spans := exporter.GetSpans()
-	require.Len(t, spans, 1)
-	assertAttribute(t, spans[0].Attributes, sampler.TransactionIdentifier, "explicit-transaction")
-	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierRoot)
-	assertHasAttribute(t, spans[0].Attributes, sampler.TransactionIdentifierExplicit)
-	assertNoAttribute(t, spans[0].Attributes, SelfDurationAttribute)
+	require.Len(t, spans, 257)
+	for _, exported := range spans {
+		assertAttribute(t, exported.Attributes, sampler.TransactionIdentifier, "explicit-transaction")
+		assertHasAttribute(t, exported.Attributes, SelfDurationAttribute)
+	}
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 

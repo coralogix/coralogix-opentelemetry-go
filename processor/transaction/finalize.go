@@ -38,7 +38,7 @@ func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktra
 	if len(spans) == 0 {
 		return nil
 	}
-	if len(spans) > p.maxTransactionSpans {
+	if p.maxTransactionSpans > 0 && len(spans) > p.maxTransactionSpans {
 		for _, s := range spans {
 			delete(p.membership, spanRefFromContext(s.SpanContext()))
 		}
@@ -73,7 +73,7 @@ func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named
 		return nil
 	}
 	groups := [][]sdktrace.ReadOnlySpan{named}
-	if len(named) <= p.maxTransactionSpans {
+	if p.maxTransactionSpans == 0 || len(named) <= p.maxTransactionSpans {
 		groups = groupByTransactionName(named)
 		for i, group := range groups {
 			groups[i] = p.stampSelfDurationAndMetrics(group)
