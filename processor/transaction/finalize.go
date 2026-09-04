@@ -259,6 +259,9 @@ func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID trac
 	if tb.liveCount() > 0 || tb.passthroughTombstone {
 		return
 	}
+	// Tombstones retain only the trace ID so late spans remain raw. Keeping an
+	// emptied map retains its buckets, which can be large for deep traces.
+	tb.liveParents = nil
 	tb.passthroughTombstone = true
 	p.passthroughOrder = append(p.passthroughOrder, traceID)
 	for len(p.passthroughOrder) > p.maxFinalizedNames {

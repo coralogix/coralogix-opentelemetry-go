@@ -368,6 +368,30 @@ func TestIntegration_LateSpansStayRawAfterTraceOverflows(t *testing.T) {
 	require.NoError(t, tp.Shutdown(context.Background()))
 }
 
+func TestIntegration_PassthroughTombstoneReleasesLiveParentMap(t *testing.T) {
+	exporter := sdktracetest.NewInMemoryExporter()
+	processor := NewTransactionSpanProcessor(exporter,
+		WithCompletionHoldback(0), WithMaxTransactionSpans(1))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(processor))
+	tracer := tp.Tracer("raw-tombstone-memory")
+
+	rootCtx, root := tracer.Start(context.Background(), "root", tracecore.WithSpanKind(tracecore.SpanKindServer))
+	traceID := root.SpanContext().TraceID()
+	_, first := tracer.Start(rootCtx, "first")
+	_, second := tracer.Start(rootCtx, "second")
+	first.End()
+	second.End()
+	root.End()
+
+	processor.mu.Lock()
+	tombstone, ok := processor.traces[traceID]
+	processor.mu.Unlock()
+	require.True(t, ok)
+	require.True(t, tombstone.passthroughTombstone)
+	assert.Nil(t, tombstone.liveParents)
+	require.NoError(t, tp.Shutdown(context.Background()))
+}
+
 func TestIntegration_MaxTracesUsesRawPassthrough(t *testing.T) {
 	exporter := sdktracetest.NewInMemoryExporter()
 	processor := NewTransactionSpanProcessor(exporter,
