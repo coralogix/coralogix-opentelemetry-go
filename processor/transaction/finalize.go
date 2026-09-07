@@ -38,7 +38,7 @@ func (p *TransactionSpanProcessor) publishCompletedIdentityLocked(spans []sdktra
 	if len(spans) == 0 {
 		return nil
 	}
-	if len(spans) > p.maxTransactionSpans {
+	if p.maxTransactionSpans > 0 && len(spans) > p.maxTransactionSpans {
 		for _, s := range spans {
 			delete(p.membership, spanRefFromContext(s.SpanContext()))
 		}
@@ -73,7 +73,7 @@ func (p *TransactionSpanProcessor) finishCompletedCtx(ctx context.Context, named
 		return nil
 	}
 	groups := [][]sdktrace.ReadOnlySpan{named}
-	if len(named) <= p.maxTransactionSpans {
+	if p.maxTransactionSpans == 0 || len(named) <= p.maxTransactionSpans {
 		groups = groupByTransactionName(named)
 		for i, group := range groups {
 			groups[i] = p.stampSelfDurationAndMetrics(group)
@@ -259,6 +259,9 @@ func (p *TransactionSpanProcessor) schedulePassthroughCleanupLocked(traceID trac
 	if tb.liveCount() > 0 || tb.passthroughTombstone {
 		return
 	}
+	// Tombstones retain only the trace ID so late spans remain raw. Keeping an
+	// emptied map retains its buckets, which can be large for deep traces.
+	tb.liveParents = nil
 	tb.passthroughTombstone = true
 	p.passthroughOrder = append(p.passthroughOrder, traceID)
 	for len(p.passthroughOrder) > p.maxFinalizedNames {
